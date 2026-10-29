@@ -11,6 +11,10 @@ It uses the companion [5C8 SDK](https://github.com/5C8/rexglue-skate3).
 
 [**Windows x64 releases**](https://github.com/5C8/skate3recomp/releases/latest)
 
+Version **1.0.2** adds board shadows for online and ambient NPC skaters,
+improves first-run difficulty-menu initialization, and fixes the fullscreen
+settings crash. See the [release notes](docs/CHANGELOG.md).
+
 1. Download and fully extract **skate3recomp-Windows-x64.zip** from Releases.
 2. Start `skate3.exe` and use the installer to select your own retail Skate 3 ISO.
 3. Complete the game installation prompts. Setup installs the bundled Title
@@ -31,6 +35,8 @@ and macOS binaries are not published in this snapshot.
 - Near 1:1 visual parity with the emulated renderer in gameplay comparisons.
 - Custom/native DirectX 12 and Vulkan rendering, enabled by default; **F5**
   switches to/from the emulated renderer.
+- Board contact shadows for the local player, online players and ambient NPC
+  skaters, with independent placement and motion smoothing.
 - Video enhancements, enhanced fonts, ultrawide HUD/world-marker corrections,
   display settings, controller/keyboard input, and SteamVR integration.
 - Separate player profiles and saves, compatible community-server online play,
@@ -52,6 +58,7 @@ the other players when joining a session.
 ## Guides
 
 - [Features, controls, online play, split screen, VR and troubleshooting](docs/FEATURES.md)
+- [Release notes](docs/CHANGELOG.md)
 - [Build from source](docs/BUILDING.md)
 - [All project configuration options and defaults](docs/CONFIGURATION.md)
 - [What is included/excluded in this clean source snapshot](docs/SOURCE_CONTENTS.md)

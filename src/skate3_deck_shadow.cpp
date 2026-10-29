@@ -51,11 +51,12 @@ float LoadF32(uint8_t* base, uint32_t addr) {
 // Published state (written on the guest render thread, read by the renderer).
 // A seqlock keeps a torn matrix from ever reaching the renderer: the readers
 // retry while the counter is odd or moved.
-constexpr uint32_t kMaxSkaters = 4;
+constexpr uint32_t kMaxSkaters = skate3::deck_shadow::kMaxSkaters;
 
 struct PublishedPlacement {
   std::atomic<uint32_t> seq{0};
   float world[16] = {};
+  uint32_t owner = 0;
   std::atomic<bool> valid{false};
 };
 
@@ -89,6 +90,13 @@ uint32_t ReadGuestU32(uint8_t* base, uint32_t addr) {
   return _byteswap_ulong(v);
 }
 
+uint32_t SkaterOwner(uint8_t* base, uint32_t presentation, uint32_t index) {
+  // Retail GetDeckMatrix receives the interface at full presentation +24.
+  const uint32_t flags = ReadGuestU32(base, presentation + 164 + index * 176);
+  const uint32_t id = flags >> 28;
+  return id < kMaxSkaters ? ReadGuestU32(base, presentation + 1816 + id * 4) : 0;
+}
+
 bool SkaterExists(uint32_t index) {
   uint8_t* base = g_base.load(std::memory_order_acquire);
   if (base == nullptr) {
@@ -99,7 +107,7 @@ bool SkaterExists(uint32_t index) {
     return false;
   }
   const uint32_t count = ReadGuestU32(base, presentation + kSkaterCountOffset);
-  return index < count && count <= 16;
+  return index < count && count <= kMaxSkaters;
 }
 
 
@@ -197,6 +205,7 @@ extern "C" REX_FUNC(sub_8277EBC8) {
   for (int i = 0; i < 16; ++i) {
     slot.world[i] = LoadF32(base, out + uint32_t(i) * 4);
   }
+  slot.owner = SkaterOwner(base, presentation, index);
   std::atomic_thread_fence(std::memory_order_release);
   slot.seq.fetch_add(1, std::memory_order_relaxed);
   slot.valid.store(true, std::memory_order_release);
@@ -320,7 +329,11 @@ bool GetPlacement(uint32_t skater_index, DeckPlacement& out) {
       out.world[i] = slot.world[i];
     }
     std::atomic_thread_fence(std::memory_order_acquire);
+    out.owner = slot.owner;
     if (slot.seq.load(std::memory_order_acquire) == before) {
+      uint8_t* base = g_base.load(std::memory_order_acquire);
+      const uint32_t presentation = g_presentation.load(std::memory_order_acquire);
+      if (!base || !presentation || out.owner != SkaterOwner(base, presentation, skater_index)) return false;
       out.valid = true;
       return true;
     }

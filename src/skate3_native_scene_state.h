@@ -1681,6 +1681,7 @@ inline std::atomic<int64_t> g_cas_ps_last_ns{-1};
 bool GuestTryLoadU32(uint8_t* base, uint32_t addr, uint32_t* out);
 void ClearItemCache();
 bool CasEditorActive(uint8_t* base);
+bool DifficultyScreenActive();
 bool PortraitRttWindowActive();
 void UpdateBrowserScreenState();
 // Parse a guest mesh struct into a DrawItem (prewarm decode workers build

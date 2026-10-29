@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "native/skate3_flat_map.h"
+#include "skate3_deck_shadow.h"
 
 namespace skate3::native_scene {
 
@@ -873,8 +874,7 @@ struct FrameScene {
   float player_chest[3] = {};
   float player_face[3] = {};
   uint32_t player_entity = 0;
-  bool deck_valid = false;
-  float deck_world[16] = {};
+  deck_shadow::DeckPlacement decks[deck_shadow::kMaxSkaters] = {};
   // This frame's SimpleDraw triangle list (PublishSimpleDraws; world
   // space), re-timed onto the scene's playback clock when the camera is
   // (RetimeSimpleDraws), carried in the scene so the replay always draws

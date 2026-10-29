@@ -460,20 +460,21 @@ float NsmTap(float2 suv, float refd, float tile_u0) {
 // built against the GUEST camera, and our scene renders through a
 // smoothed, re-timed one, so the decal would swim during camera motion.
 float3 DeckShadow(float3 wp) {
-  if (deck_p.x <= 0.0) {
-    return 1.0;  // no board placed this frame (menus, no skater)
+  float3 shade = 1.0;
+  // The guest blends each skater's deferred decal multiplicatively.
+  [unroll] for (uint index = 0; index < 7; ++index) {
+    float4 x = deck_rows[index * 4];
+    float4 y = deck_rows[index * 4 + 1];
+    float4 z = deck_rows[index * 4 + 2];
+    float4 parameters = deck_rows[index * 4 + 3];
+    if (parameters.x <= 0.0) continue;
+    float2 uv = float2(dot(wp, x.xyz) + x.w, dot(wp, z.xyz) + z.w);
+    if (any(uv != saturate(uv))) continue;
+    float fade = abs(dot(wp, y.xyz) + y.w) * parameters.y;
+    if (fade >= 1.0) continue;
+    shade *= saturate(deck_decal.SampleLevel(smp_clamp, uv, 0.0).rgb + fade);
   }
-  float2 uv = float2(dot(wp, deck_x.xyz) + deck_x.w,
-                     dot(wp, deck_z.xyz) + deck_z.w);
-  if (any(uv != saturate(uv))) {
-    return 1.0;  // the guest gets this from the texture's white border
-  }
-  // |deck-space Y| * c4.z, the game's fade-to-white.
-  float fade = abs(dot(wp, deck_y.xyz) + deck_y.w) * deck_p.y;
-  if (fade >= 1.0) {
-    return 1.0;
-  }
-  return saturate(deck_decal.SampleLevel(smp_clamp, uv, 0.0).rgb + fade);
+  return shade;
 }
 
 // nrm drives the SLOPE-scaled receiver bias (static-map casters receiving

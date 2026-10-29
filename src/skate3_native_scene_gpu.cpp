@@ -7185,6 +7185,7 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
   static bool s_seen_gameplay = false;
   static bool s_pause_native = false;
   const bool in_menus = rex::kernel::guest_presence::GameplayContextValue() == 0;
+  const bool difficulty_init = in_menus && DifficultyScreenActive();
   // Render-thread mirror for the 2D texture resolver: menu screens shorten
   // the content-liveness recheck cadence (see resolve_2d_texture) so
   // in-place rewrites of UI textures (the one-shot skater-portrait resolves)
@@ -7249,24 +7250,27 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
   {
     static bool s_unsup_forced = false;
     static bool s_unsup_saved = false;
-    const bool want =
-        in_menus && REXCVAR_GET(skate3_native_render_scene_menu_unsuppress);
+    // Screen 9 can need initialization passes outside the pitch-exempt
+    // portrait band. Let those execute while continuing to present the
+    // native UI. Restore the configured suppression when the screen closes.
+    const bool want = difficulty_init ||
+        (in_menus && REXCVAR_GET(skate3_native_render_scene_menu_unsuppress));
     if (want && !s_unsup_forced) {
       s_unsup_saved = REXCVAR_GET(native_render_suppress_emulated_draws);
       if (s_unsup_saved) {
         REXCVAR_SET(native_render_suppress_emulated_draws, false);
         REXLOG_INFO(
-            "native-scene: menu context - emulated draw suppression OFF "
-            "(one-shot render-to-texture passes execute; restored on "
-            "gameplay)");
+            "native-scene: {} - emulated initialization draws enabled "
+            "(native presentation retained)",
+            difficulty_init ? "difficulty screen" : "menu context");
       }
       s_unsup_forced = true;
     } else if (!want && s_unsup_forced) {
       if (s_unsup_saved) {
         REXCVAR_SET(native_render_suppress_emulated_draws, true);
         REXLOG_INFO(
-            "native-scene: leaving menu context - emulated draw suppression "
-            "restored");
+            "native-scene: menu initialization window closed - emulated "
+            "draw suppression restored");
       }
       s_unsup_forced = false;
     }
@@ -7285,10 +7289,10 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
     // it, menus keep the gameplay-proven mode-2 suppression instead of
     // executing the game's postfx chain emulated at scale every frame
     // (the pause-menu/title-screen GPU contention).
-    const bool want =
-        in_menus && REXCVAR_GET(skate3_native_render_scene_menu_rtt_passes) &&
+    const bool want = difficulty_init ||
+        (in_menus && REXCVAR_GET(skate3_native_render_scene_menu_rtt_passes) &&
         (REXCVAR_GET(skate3_native_render_scene_menu_rtt_scope) == 0 ||
-         PortraitRttWindowActive());
+         PortraitRttWindowActive()));
     if (want && !s_mode_forced) {
       s_mode_saved = REXCVAR_GET(native_render_suppress_mode);
       // Mode 3, not 0: the portrait-class RTTs (census 560-1200 during the
@@ -11386,18 +11390,21 @@ class InterFrameAdvance {
     // fps cap, plainly visible at speed). Mid-flip (fast spin) the deck
     // keeps cur's orientation like any spinning piece but its position
     // still interpolates; a teleport (respawn) is not interpolated.
-    if (p.deck_valid && scene_->deck_valid) {
-      const float jx = scene_->deck_world[12] - p.deck_world[12];
-      const float jy = scene_->deck_world[13] - p.deck_world[13];
-      const float jz = scene_->deck_world[14] - p.deck_world[14];
+    for (uint32_t index = 0; index < skate3::deck_shadow::kMaxSkaters; ++index) {
+      const auto& previous = p.decks[index];
+      auto& deck = scene_->decks[index];
+      if (!previous.valid || !deck.valid || previous.owner != deck.owner) continue;
+      const float jx = deck.world[12] - previous.world[12];
+      const float jy = deck.world[13] - previous.world[13];
+      const float jz = deck.world[14] - previous.world[14];
       if (jx * jx + jy * jy + jz * jz < 9.0f) {
-        std::memcpy(saved_deck_, scene_->deck_world, sizeof(saved_deck_));
-        if (InterFrameLerpWorld(scene_->deck_world, p.deck_world, saved_deck_, a)) {
+        std::memcpy(saved_deck_[index], deck.world, sizeof(deck.world));
+        if (InterFrameLerpWorld(deck.world, previous.world, saved_deck_[index], a)) {
           for (int k = 12; k < 15; ++k) {
-            scene_->deck_world[k] = p.deck_world[k] + (saved_deck_[k] - p.deck_world[k]) * a;
+            deck.world[k] = previous.world[k] + (saved_deck_[index][k] - previous.world[k]) * a;
           }
         }
-        deck_posed_ = true;
+        deck_posed_[index] = true;
       }
     }
     // Palette pools: skinned items whose palettes are identical draw from one
@@ -11545,8 +11552,8 @@ class InterFrameAdvance {
     std::memcpy(scene_->view_proj, saved_view_proj_, sizeof(saved_view_proj_));
     std::memcpy(scene_->cam_pos, saved_cam_pos_, sizeof(saved_cam_pos_));
     std::memcpy(scene_->proj, saved_proj_, sizeof(saved_proj_));
-    if (deck_posed_) {
-      std::memcpy(scene_->deck_world, saved_deck_, sizeof(saved_deck_));
+    for (uint32_t index = 0; index < skate3::deck_shadow::kMaxSkaters; ++index) {
+      if (deck_posed_[index]) std::memcpy(scene_->decks[index].world, saved_deck_[index], sizeof(saved_deck_[index]));
     }
     for (size_t mi = 0; mi < g_inter.matches.size(); ++mi) {
       DrawItem& it = scene_->items[g_inter.matches[mi].cur];
@@ -11564,8 +11571,8 @@ class InterFrameAdvance {
 
  private:
   FrameScene* scene_ = nullptr;
-  float saved_deck_[16] = {};
-  bool deck_posed_ = false;
+  float saved_deck_[skate3::deck_shadow::kMaxSkaters][16] = {};
+  bool deck_posed_[skate3::deck_shadow::kMaxSkaters] = {};
   double content_time_ = 0.0;
   float posed_head_[3] = {};
   bool posed_head_valid_ = false;
@@ -11681,7 +11688,7 @@ void PaceRecordPresent(const FrameScene& scene, bool inter_frame, double content
   std::memcpy(r.vp, scene.view_proj, sizeof(r.vp));
   std::memcpy(r.head, posed_head != nullptr ? posed_head : scene.player_head, sizeof(r.head));
   r.head_valid = scene.player_pose_valid ? 1 : 0;
-  std::memcpy(r.deck, scene.deck_world + 12, sizeof(r.deck));
+  std::memcpy(r.deck, scene.decks[0].world + 12, sizeof(r.deck));
   // One traffic vehicle (char family 6) tracked by CONTINUITY: the same mesh
   // nearest its last recorded position (within 6 m: a real stale-pose jump
   // still shows), else a new track on the nearest within 40 m of the camera.
@@ -12755,63 +12762,52 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         !REXCVAR_GET(skate3_native_render_scene_sun_override)) {
       std::memcpy(cb + 64, g_r.world_shadow_rows, sizeof(g_r.world_shadow_rows));
     }
-    // Deck (skateboard) contact shadow (deck_x/deck_y/deck_z/deck_p at
-    // cb[240..255]). The console runs this as a deferred decal box in
-    // postfx_deck_AO; we evaluate the same decal per lit world pixel, so
-    // all the shader needs is world -> decal-uv. Built from the board's
-    // world matrix (the guest's own GetDeckMatrix) rather than replaying
-    // its c0..c2, which bake in the guest camera.
-    cb[252] = 0.0f;  // strength 0 = no board this frame
-    {
-      if (base != nullptr && scene.deck_valid) {
+    // One decal for every live skater, as in the guest's postfx deck loop.
+    // The texture is shared; each placement follows its own playback history.
+    uint32_t deck_words[6] = {};
+    if (base && skate3::deck_shadow::GetDecalFetch(deck_words) &&
+        (!g_r.deck_decal_valid || std::memcmp(g_r.deck_decal_words, deck_words, sizeof(deck_words)) != 0)) {
+      if (EnsureGuestTextureFromWords(context, base, deck_words, g_r.deck_decal) && g_r.deck_decal.srv) {
+        std::memcpy(g_r.deck_decal_words, deck_words, sizeof(deck_words));
+        g_r.deck_decal_valid = true;
+      }
+    }
+    static_assert(RendererState::kShadowCbSlice >= (976 + skate3::deck_shadow::kMaxSkaters * 16) * sizeof(float));
+    for (uint32_t index = 0; index < skate3::deck_shadow::kMaxSkaters; ++index) {
+      const auto& deck = scene.decks[index];
+      float* rows = cb + 976 + index * 16;
+      rows[12] = 0.0f;
+      if (base && deck.valid && g_r.deck_decal_valid) {
         // Re-timed onto the render playback clock by
         // InterpolateDynamicItems: the raw guest matrix runs ahead of the
         // board as rendered, which slid the decal forward at speed.
-        const float* const right = scene.deck_world + 0;  // local X (width)
-        const float* const up = scene.deck_world + 4;     // local Y
-        const float* const fwd = scene.deck_world + 8;    // local Z (length)
-        const float* const pos = scene.deck_world + 12;
+        const float* const right = deck.world + 0;  // local X (width)
+        const float* const up = deck.world + 4;     // local Y
+        const float* const fwd = deck.world + 8;    // local Z (length)
+        const float* const pos = deck.world + 12;
         // 1 / (2 * half-extent) == the guest's own c4.xy (1.6, 0.9).
         const float su = 0.5f / skate3::deck_shadow::kHalfWidth;
         const float sv = 0.5f / skate3::deck_shadow::kHalfLength;
-        cb[240] = right[0] * su;
-        cb[241] = right[1] * su;
-        cb[242] = right[2] * su;
-        cb[243] = 0.5f - (right[0] * pos[0] + right[1] * pos[1] +
+        rows[0] = right[0] * su;
+        rows[1] = right[1] * su;
+        rows[2] = right[2] * su;
+        rows[3] = 0.5f - (right[0] * pos[0] + right[1] * pos[1] +
                           right[2] * pos[2]) * su;
-        cb[244] = up[0];  // unscaled, as the guest's c1 row is
-        cb[245] = up[1];
-        cb[246] = up[2];
-        cb[247] = -(up[0] * pos[0] + up[1] * pos[1] + up[2] * pos[2]);
-        cb[248] = fwd[0] * sv;
-        cb[249] = fwd[1] * sv;
-        cb[250] = fwd[2] * sv;
-        cb[251] = 0.5f - (fwd[0] * pos[0] + fwd[1] * pos[1] +
+        rows[4] = up[0];  // unscaled, as the guest's c1 row is
+        rows[5] = up[1];
+        rows[6] = up[2];
+        rows[7] = -(up[0] * pos[0] + up[1] * pos[1] + up[2] * pos[2]);
+        rows[8] = fwd[0] * sv;
+        rows[9] = fwd[1] * sv;
+        rows[10] = fwd[2] * sv;
+        rows[11] = 0.5f - (fwd[0] * pos[0] + fwd[1] * pos[1] +
                           fwd[2] * pos[2]) * sv;
         // c4.z: the guest's fade-to-white rate per unit off the board's
         // plane (full white at 1/5 = 0.2 units), verbatim.
-        cb[253] = 5.0f;
-        cb[254] = 0.0f;
-        cb[255] = 0.0f;
-        // Decode the decal itself once; the fetch words are constant for
-        // the session (a static texture), so this is a single decode.
-        uint32_t deck_words[6] = {};
-        if (skate3::deck_shadow::GetDecalFetch(deck_words)) {
-          if (!g_r.deck_decal_valid ||
-              std::memcmp(g_r.deck_decal_words, deck_words,
-                          sizeof(deck_words)) != 0) {
-            if (EnsureGuestTextureFromWords(context, base, deck_words,
-                                            g_r.deck_decal) &&
-                g_r.deck_decal.srv != nullptr) {
-              std::memcpy(g_r.deck_decal_words, deck_words,
-                          sizeof(deck_words));
-              g_r.deck_decal_valid = true;
-            }
-          }
-        }
-        if (g_r.deck_decal_valid) {
-          cb[252] = 1.0f;
-        }
+        rows[13] = 5.0f;
+        rows[14] = 0.0f;
+        rows[15] = 0.0f;
+        rows[12] = 1.0f;
       }
     }
     // flowingwateralpha m_params rows (wat_p0..wat_p3 at cb[76..91]):

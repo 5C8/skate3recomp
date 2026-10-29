@@ -25,10 +25,14 @@ world-space NPC arrow/online nametag positioning. The renderer also includes
 enhanced embedded fonts. Features and available controls vary with the game
 build; the in-game description says whether a restart is needed.
 
-The milestone build includes native board-shadow handling for multiple online
-skaters.
-The milestone build does not include the retail draw-distance/demo-path hooks
-whose addresses are still unresolved.
+Board contact shadows cover the local player, online players and ambient NPC
+skaters, supporting up to seven active skaters. Each shadow follows its own
+board, including when motion smoothing is enabled; despawned skaters and reused
+slots do not leave an old shadow behind.
+
+Fullscreen changes in Settings apply after the current menu frame finishes
+drawing. The first-run difficulty selector keeps its initialization drawing
+steps active while the custom renderer presents the menu.
 
 ## Settings and input
 

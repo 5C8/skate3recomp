@@ -971,9 +971,14 @@ void Skate3BaseApp::ToggleSimpleSettings() {
   env.profiles_path = profiles_path_;
   env.is_fullscreen = [this] { return window() && window()->IsFullscreen(); };
   env.set_fullscreen = [this](bool on) {
-    if (auto* w = window()) {
-      w->SetFullscreen(on);
-    }
+    // Settings callbacks run inside the presenter's UI draw. Resizing here
+    // can replace the swap-chain buffers still referenced by that frame.
+    // Always defer, even on the UI thread, until painting has returned.
+    app_context().CallInUIThreadDeferred([this, on]() {
+      if (auto* w = window()) {
+        w->SetFullscreen(on);
+      }
+    });
   };
   env.profile_changed = [this] { ApplySelectedProfileToRuntime(); };
   settings_menu_ = std::make_unique<skate3::SettingsMenu>(

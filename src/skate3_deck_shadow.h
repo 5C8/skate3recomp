@@ -27,13 +27,16 @@
 
 namespace skate3::deck_shadow {
 
+inline constexpr uint32_t kMaxSkaters = 7;
+
 // One skater's board placement for this frame.
 struct DeckPlacement {
   // Board world transform, row-major as the guest stores it: rows 0..2 are the
   // orthonormal right/up/forward axes, row 3 the world position. The board's
   // plane is its local XZ; local Y is up.
   float world[16];
-  bool valid;
+  bool valid = false;
+  uint32_t owner = 0;
 };
 
 // Latest board transform published by the GetDeckMatrix hook. Returns false

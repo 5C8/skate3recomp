@@ -4383,6 +4383,33 @@ bool CasEditorActive(uint8_t* base) {
   return false;
 }
 
+// Retail's first-run difficulty selector is FE screen 9 (stack [0,9]).
+// Keep its initialization draws executing even while the screen is presented
+// natively: users with a cold startup reported missing choices/footer until
+// an emulated frame ran. The pitch-only portrait filter does not cover every
+// pass this screen can depend on. Check the live stack rather than a timer.
+bool DifficultyScreenActive() {
+  uint8_t* base = g_guest_base.load(std::memory_order_relaxed);
+  constexpr uint32_t kFrontEndManagerPtr = 0x830CFE14;
+  uint32_t mgr = 0, beg = 0, end = 0;
+  if (base == nullptr ||
+      !GuestTryLoadU32(base, kFrontEndManagerPtr, &mgr) || mgr == 0 ||
+      !GuestTryLoadU32(base, mgr + 0x210, &beg) ||
+      !GuestTryLoadU32(base, mgr + 0x214, &end) || beg > end ||
+      end - beg > 20 * 16 || (end - beg) % 20 != 0) {
+    return false;
+  }
+  bool found = false;
+  for (uint32_t i = 0; i < (end - beg) / 20; ++i) {
+    uint32_t id = 0;
+    if (!GuestTryLoadU32(base, beg + i * 20, &id)) {
+      return false;
+    }
+    found |= id == 9;
+  }
+  return found;
+}
+
 // Should the emulated sub-framebuffer RTT passes execute right now (the
 // menus' suppress_mode -> 0 forcing, see menu_rtt_scope)? The one-shot
 // skater-portrait RTT renders are the only reason menus need mode 0, and
@@ -11804,97 +11831,109 @@ void InterpolateDynamicItems(uint8_t* base, FrameScene& scene, double now) {
       double t = 0.0;
       float m[16] = {};
     };
-    static DeckPose s_ring[kDeckRing];
-    static int s_count = 0;
-    static int s_newest = 0;
-    skate3::deck_shadow::DeckPlacement dp = {};
-    if (!skate3::deck_shadow::GetPlacement(0, dp)) {
-      scene.deck_valid = false;
-      s_count = 0;
-    } else {
-      const DeckPose& latest = s_ring[s_newest];
-      bool changed = s_count == 0;
-      for (int i = 0; i < 16 && !changed; ++i) {
-        changed = std::abs(latest.m[i] - dp.world[i]) > 1e-6f;
-      }
-      // A discontinuity (respawn, bail reset, camera cut) must not lerp
-      // across the map; restart the ring instead.
-      if (s_count > 0) {
-        const float dx = dp.world[12] - latest.m[12];
-        const float dy = dp.world[13] - latest.m[13];
-        const float dz = dp.world[14] - latest.m[14];
-        if (dx * dx + dy * dy + dz * dz > 25.0f) {
-          s_count = 0;
-          changed = true;
-        }
-      }
-      // Stamp with the camera sampler's latest sim tick, exactly as the
-      // entity rings above do: the board's matrix changed on that tick, and
-      // stamping with the FRAME time instead aliases against the sim rate
-      // once the render loop is paced. That alias is what made the decal
-      // trail the board at low frame rates -- the board renders from a
-      // sim-tick-stamped pose while the decal was stamped up to a whole
-      // render frame later, so evaluating both at the same playback point
-      // handed the decal the older pose.
-      const double stamp =
-          (g_latest_cam_tick > 0.0 && now - g_latest_cam_tick < 0.02) ? g_latest_cam_tick
-                                                                       : now;
-      if (changed && !(s_count > 0 && stamp - latest.t < kMinDynIngestSpacing)) {
-        s_newest = s_count == 0 ? 0 : (s_newest + 1) % kDeckRing;
-        s_ring[s_newest].t = stamp;
-        std::memcpy(s_ring[s_newest].m, dp.world, sizeof(dp.world));
-        s_count = std::min(s_count + 1, kDeckRing);
-      }
-      const double filter_w = std::clamp(
-          REXCVAR_GET(skate3_native_render_scene_smooth_camera_filter_ms), 0.0,
-          200.0) * 1e-3;
-      const auto deck_at = [&](double tt, float weight, float out[16]) {
-        int hi = s_newest;
-        int lo = (s_newest + kDeckRing - 1) % kDeckRing;
-        for (int step = 1; step < s_count - 1; ++step) {
-          if (s_ring[lo].t <= tt) {
-            break;
-          }
-          hi = lo;
-          lo = (lo + kDeckRing - 1) % kDeckRing;
-        }
-        const DeckPose& p0 = s_ring[lo];
-        const DeckPose& p1 = s_ring[hi];
-        const double span = std::max(p1.t - p0.t, 0.0005);
-        const float a = float(std::clamp((tt - p0.t) / span, 0.0, 1.0));
-        for (int i = 0; i < 16; ++i) {
-          out[i] += (p0.m[i] + (p1.m[i] - p0.m[i]) * a) * weight;
-        }
-      };
-      float m[16] = {};
-      if (s_count >= 4 && filter_w > 0.0005) {
-        constexpr int kTaps = 8;
-        for (int tap = 0; tap < kTaps; ++tap) {
-          deck_at(std::min(g_smooth_play - filter_w * 0.5 +
-                               (tap + 0.5) * filter_w / kTaps,
-                           s_ring[s_newest].t),
-                  1.0f / kTaps, m);
-        }
-      } else if (s_count >= 2) {
-        deck_at(g_smooth_play, 1.0f, m);
+    struct DeckHistory {
+      DeckPose ring[kDeckRing];
+      int count = 0, newest = 0;
+      uint32_t owner = 0;
+    };
+    static DeckHistory histories[skate3::deck_shadow::kMaxSkaters];
+    for (uint32_t index = 0; index < skate3::deck_shadow::kMaxSkaters; ++index) {
+      auto& history = histories[index];
+      auto& s_ring = history.ring;
+      auto& s_count = history.count;
+      auto& s_newest = history.newest;
+      auto& deck = scene.decks[index];
+      skate3::deck_shadow::DeckPlacement dp = {};
+      if (!skate3::deck_shadow::GetPlacement(index, dp)) {
+        deck.valid = false;
+        s_count = 0;
       } else {
-        std::memcpy(m, dp.world, sizeof(m));
-      }
-      // Componentwise averaging shrinks the basis while the board spins
-      // (the same effect the bone path guards against); the decal's
-      // footprint is 1/|axis|, so renormalize the three axes to keep it
-      // the size the guest's c4.xy sets. Position is unaffected.
-      for (int r = 0; r < 3; ++r) {
-        float* a = m + r * 4;
-        const float len = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
-        if (len > 1e-6f) {
-          a[0] /= len;
-          a[1] /= len;
-          a[2] /= len;
+        if (history.owner != dp.owner) s_count = 0;
+        history.owner = deck.owner = dp.owner;
+        const DeckPose& latest = s_ring[s_newest];
+        bool changed = s_count == 0;
+        for (int i = 0; i < 16 && !changed; ++i) {
+          changed = std::abs(latest.m[i] - dp.world[i]) > 1e-6f;
         }
+        // A discontinuity (respawn, bail reset, camera cut) must not lerp
+        // across the map; restart the ring instead.
+        if (s_count > 0) {
+          const float dx = dp.world[12] - latest.m[12];
+          const float dy = dp.world[13] - latest.m[13];
+          const float dz = dp.world[14] - latest.m[14];
+          if (dx * dx + dy * dy + dz * dz > 25.0f) {
+            s_count = 0;
+            changed = true;
+          }
+        }
+        // Stamp with the camera sampler's latest sim tick, exactly as the
+        // entity rings above do: the board's matrix changed on that tick, and
+        // stamping with the FRAME time instead aliases against the sim rate
+        // once the render loop is paced. That alias is what made the decal
+        // trail the board at low frame rates -- the board renders from a
+        // sim-tick-stamped pose while the decal was stamped up to a whole
+        // render frame later, so evaluating both at the same playback point
+        // handed the decal the older pose.
+        const double stamp =
+            (g_latest_cam_tick > 0.0 && now - g_latest_cam_tick < 0.02) ? g_latest_cam_tick
+                                                                         : now;
+        if (changed && !(s_count > 0 && stamp - latest.t < kMinDynIngestSpacing)) {
+          s_newest = s_count == 0 ? 0 : (s_newest + 1) % kDeckRing;
+          s_ring[s_newest].t = stamp;
+          std::memcpy(s_ring[s_newest].m, dp.world, sizeof(dp.world));
+          s_count = std::min(s_count + 1, kDeckRing);
+        }
+        const double filter_w = std::clamp(
+            REXCVAR_GET(skate3_native_render_scene_smooth_camera_filter_ms), 0.0,
+            200.0) * 1e-3;
+        const auto deck_at = [&](double tt, float weight, float out[16]) {
+          int hi = s_newest;
+          int lo = (s_newest + kDeckRing - 1) % kDeckRing;
+          for (int step = 1; step < s_count - 1; ++step) {
+            if (s_ring[lo].t <= tt) {
+              break;
+            }
+            hi = lo;
+            lo = (lo + kDeckRing - 1) % kDeckRing;
+          }
+          const DeckPose& p0 = s_ring[lo];
+          const DeckPose& p1 = s_ring[hi];
+          const double span = std::max(p1.t - p0.t, 0.0005);
+          const float a = float(std::clamp((tt - p0.t) / span, 0.0, 1.0));
+          for (int i = 0; i < 16; ++i) {
+            out[i] += (p0.m[i] + (p1.m[i] - p0.m[i]) * a) * weight;
+          }
+        };
+        float m[16] = {};
+        if (s_count >= 4 && filter_w > 0.0005) {
+          constexpr int kTaps = 8;
+          for (int tap = 0; tap < kTaps; ++tap) {
+            deck_at(std::min(g_smooth_play - filter_w * 0.5 +
+                                 (tap + 0.5) * filter_w / kTaps,
+                             s_ring[s_newest].t),
+                    1.0f / kTaps, m);
+          }
+        } else if (s_count >= 2) {
+          deck_at(g_smooth_play, 1.0f, m);
+        } else {
+          std::memcpy(m, dp.world, sizeof(m));
+        }
+        // Componentwise averaging shrinks the basis while the board spins
+        // (the same effect the bone path guards against); the decal's
+        // footprint is 1/|axis|, so renormalize the three axes to keep it
+        // the size the guest's c4.xy sets. Position is unaffected.
+        for (int r = 0; r < 3; ++r) {
+          float* a = m + r * 4;
+          const float len = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+          if (len > 1e-6f) {
+            a[0] /= len;
+            a[1] /= len;
+            a[2] /= len;
+          }
+        }
+        std::memcpy(deck.world, m, sizeof(m));
+        deck.valid = true;
       }
-      std::memcpy(scene.deck_world, m, sizeof(m));
-      scene.deck_valid = true;
     }
   }
   // Prune entities not seen recently (map otherwise grows with streaming).
@@ -15226,20 +15265,24 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
   // re-timed path; unsmoothed frames (smooth_camera off, or no camera
   // history yet) take the game's own placement for this frame, which is
   // already consistent with the raw camera and skater.
-  if (!scene.deck_valid) {
-    skate3::deck_shadow::DeckPlacement dp = {};
-    if (skate3::deck_shadow::GetPlacement(0, dp)) {
-      std::memcpy(scene.deck_world, dp.world, sizeof(dp.world));
-      for (int r = 0; r < 3; ++r) {
-        float* a = scene.deck_world + r * 4;
-        const float len = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
-        if (len > 1e-6f) {
-          a[0] /= len;
-          a[1] /= len;
-          a[2] /= len;
+  for (uint32_t index = 0; index < skate3::deck_shadow::kMaxSkaters; ++index) {
+    auto& deck = scene.decks[index];
+    if (!deck.valid) {
+      skate3::deck_shadow::DeckPlacement dp = {};
+      if (skate3::deck_shadow::GetPlacement(index, dp)) {
+        std::memcpy(deck.world, dp.world, sizeof(dp.world));
+        for (int r = 0; r < 3; ++r) {
+          float* a = deck.world + r * 4;
+          const float len = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+          if (len > 1e-6f) {
+            a[0] /= len;
+            a[1] /= len;
+            a[2] /= len;
+          }
         }
+        deck.owner = dp.owner;
+        deck.valid = true;
       }
-      scene.deck_valid = true;
     }
   }
 
