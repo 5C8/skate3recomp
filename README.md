@@ -33,6 +33,15 @@ Open Settings with **Escape/F1** or **RB + Start**. To launch split screen, run
 `skate3.exe --splitscreen`, assign connected controllers to screens, then select
 different profiles and host/join a compatible online session.
 
+## Online server
+
+5C8's community Blaze server: **`129.151.200.180`**.
+
+Open **Settings (Escape/F1) → Online → Server Address**, enter
+`129.151.200.180`, and press **Enter** to save. Then connect through the game's
+online menus. The server supports both projects; use the same game build as
+the other players when joining a session.
+
 ## Guides
 
 - [Features, controls, online play, split screen, VR and troubleshooting](docs/FEATURES.md)
