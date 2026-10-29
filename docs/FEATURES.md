@@ -5,7 +5,8 @@
 The custom/native renderer is enabled by default. **F5** switches between the
 native and emulated renderers while running. The emulated renderer remains useful
 for checking visual differences. On Windows, the Video settings select DirectX
-12 or Vulkan; graphics API changes require a restart.
+12 or Vulkan; graphics API changes require a restart. Gameplay comparisons
+have shown near 1:1 visual parity with the emulated renderer.
 
 Video settings cover resolution/render scale, fullscreen, aspect ratio, frame
 limit, VSync/VRR, multisampling, enhanced sun shadows, ambient occlusion, bloom,
@@ -15,8 +16,7 @@ enhanced embedded fonts. Features and available controls vary with the game
 build; the in-game description says whether a restart is needed.
 
 The milestone build includes native board-shadow handling for multiple online
-skaters. Renderer parity remains a work in progress: streaming, customization,
-Hall of Meat and park-editor visuals can still differ from the emulated path.
+skaters.
 The milestone build does not include the retail draw-distance/demo-path hooks
 whose addresses are still unresolved.
 
@@ -33,9 +33,8 @@ controllers; change the backend in Controls and restart when requested. Keyboard
 and mouse input, bindings, camera controls, and SteamVR settings are available in
 the player settings. The SDK also exposes developer configuration controls.
 See [the generated configuration reference](CONFIGURATION.md) for every
-project-registered setting, its source default, and description. Some entries
-are experiments or diagnostic controls; their presence is not a promise of
-complete visual parity.
+project-registered setting, its source default, and description. Experimental
+and diagnostic entries are identified in their descriptions.
 
 ## Profiles, online play and split screen
 

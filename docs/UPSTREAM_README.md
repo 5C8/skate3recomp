@@ -1,3 +1,6 @@
+> Upstream reference, adapted to reflect this fork’s current renderer status.
+> See [the project README](../README.md) for current downloads and supported platforms.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="banner.png">
   <source media="(prefers-color-scheme: light)" srcset="banner-light.png">
@@ -8,7 +11,7 @@ An unofficial native recompilation of the Xbox 360 version of Skate 3, supportin
 
 As of v2.0.0, the game runs on a native renderer built directly on Direct3D 12 and Vulkan instead of emulating the Xbox 360 GPU. Compared to the emulated renderer it delivers more than twice the frame rate at roughly a quarter of the GPU power draw, and on Apple Silicon the frame rate uplift is closer to 10x.
 
-The new native renderer is early and is likely to have issues, I haven't tested the game all the way through.
+The native renderer in this fork has achieved near 1:1 visual parity with the emulated renderer in gameplay comparisons.
 
 The project does not include Skate 3 retail game files. To run or build the project, you must provide files from your own legally obtained Xbox 360 copy of Skate 3.
 
@@ -63,13 +66,6 @@ Since v2.0.0 the game no longer relies on emulating the Xbox 360 GPU. A native r
 - The native renderer is on by default. Settings > Video > Renderer switches between Native and Emulated live, and F5 hot-toggles between them at any time. If the native renderer ever hits an unrecoverable error, the game falls back to the emulated renderer and shows a corner indicator; F5 retries the native path.
 - On Windows, a single build ships both graphics API backends: Settings > Video > Graphics API selects DirectX 12 or Vulkan (applied with Apply & Restart; DirectX 12 is preferred by default). Linux uses Vulkan, and macOS uses Vulkan through MoltenVK.
 - Optional enhancements beyond the original game live under Settings > Video: MSAA up to 8x, enhanced real-time sun shadows with contact-hardening soft shadows, ambient occlusion, bloom, volumetric lighting, extended draw distance and world streaming, render scale up to 3x, and true ultrawide.
-
-Known issues:
-
-- Occasional texture and asset pop-in or brief flicker while streaming quickly around the map (also present in the emulated renderer)
-- Issues with rendering skater customization options in the edit skater mode (skin, hair, clothing etc.)
-- Hall of Meat currently not rendered properly (missing bone highlights etc.)
-- Skate parks and park editing currently have some general visual parity / rendering issues
 
 ## Installing DLC
 

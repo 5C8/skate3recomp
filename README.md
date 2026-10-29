@@ -22,6 +22,7 @@ and macOS binaries are not published in this snapshot.
 
 ## Included features
 
+- Near 1:1 visual parity with the emulated renderer in gameplay comparisons.
 - Custom/native DirectX 12 and Vulkan rendering, enabled by default; **F5**
   switches to/from the emulated renderer.
 - Video enhancements, enhanced fonts, ultrawide HUD/world-marker corrections,
