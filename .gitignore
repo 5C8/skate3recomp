@@ -1,0 +1,26 @@
+# Local game files and generated main-game implementation
+/game/
+/assets/
+/generated/
+/TU_*
+# Build outputs and local developer configuration
+/out/
+/build/
+/pgo/
+CMakeUserPresets.json
+.vs/
+.vscode/
+__pycache__/
+*.pyc
+*.bak
+*.pdb
+*.profraw
+*.profdata
+# Downloaded OpenVR runtime (tools/fetch_openvr.py)
+/thirdparty/openvr/openvr_api.dll
+# User data
+/saves/
+/profiles/
+/logs/
+portable.txt
+*.log
