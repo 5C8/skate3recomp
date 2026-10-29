@@ -26,7 +26,7 @@ whose addresses are still unresolved.
   **RB + Start** and can be rebound.
 - **F5**: switch renderer.
 - **F12**: native-renderer developer controls.
-- **F10**: insert a diagnostic marker in the log.
+- **F10** (retail build): insert a diagnostic marker in the log.
 
 Xbox controllers work through XInput. The SDL controller backend supports other
 controllers; change the backend in Controls and restart when requested. Keyboard
