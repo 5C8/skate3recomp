@@ -11,7 +11,7 @@ if(SKATE3_STATIC_MSVC_RUNTIME)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(skate3 VERSION 1.0.0 LANGUAGES CXX)
+project(skate3 VERSION 1.0.1 LANGUAGES CXX)
 
 if(WIN32)
     enable_language(RC)
@@ -90,6 +90,8 @@ set(SKATE3_GAME_DATA_ROOT
 set(SKATE3_TITLE_UPDATE_PACKAGE
     ""
     CACHE FILEPATH "Optional Skate 3 title update STFS package used for codegen")
+option(SKATE3_REQUIRE_TITLE_UPDATE
+    "Require Title Update 3 game images or matching runtime patches" ON)
 option(SKATE3_ENABLE_X86_64_V3
     "Build x86_64 desktop binaries for x86-64-v3 CPUs (AVX2/BMI2)"
     OFF)
@@ -156,6 +158,9 @@ set(SKATE3_FUNCTION_CONFIG_INCLUDES
     "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_functions.toml\",")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
+    if(NOT SKATE3_REQUIRE_TITLE_UPDATE)
+        message(FATAL_ERROR "Title-update codegen requires SKATE3_REQUIRE_TITLE_UPDATE=ON")
+    endif()
     if(NOT EXISTS "${SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE}")
         message(FATAL_ERROR
             "SKATE3_TITLE_UPDATE_PACKAGE does not exist: ${SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE}")
@@ -395,11 +400,8 @@ else()
                    "Vulkan SPIR-V (stale once the HLSL changes)")
 endif()
 target_compile_definitions(skate3 PRIVATE SKATE3_BUILD_CONFIG="$<CONFIG>")
-if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
-    target_compile_definitions(skate3 PRIVATE SKATE3_HAS_TITLE_UPDATE=1)
-else()
-    target_compile_definitions(skate3 PRIVATE SKATE3_HAS_TITLE_UPDATE=0)
-endif()
+target_compile_definitions(skate3 PRIVATE
+    SKATE3_HAS_TITLE_UPDATE=$<BOOL:${SKATE3_REQUIRE_TITLE_UPDATE}>)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/sources.cmake")
     include(generated/sources.cmake)

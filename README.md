@@ -13,7 +13,13 @@ It uses the companion [5C8 SDK](https://github.com/5C8/rexglue-skate3).
 
 1. Download and fully extract **skate3recomp-Windows-x64.zip** from Releases.
 2. Start `skate3.exe` and use the installer to select your own retail Skate 3 ISO.
-3. Complete the game/title-update installation prompts, then start the game.
+3. Complete the game installation prompts. Setup installs the bundled Title
+   Update 3 patches automatically, then starts the game.
+
+The retail ISO supplies the base game. Both required TU3 `.xexp` patches are
+included under `title-update/` in the Windows download. You do not need to find
+a prepatched XEX or download TU3 separately. Keep that folder with the executable.
+Already updated installations are recognized, and updates are not applied twice.
 
 The release contains the application and its runtime dependencies. Provide your
 own matching game files. Windows x64 with an x86-64-v3 CPU (AVX2/BMI2), a

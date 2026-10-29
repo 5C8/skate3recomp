@@ -1,5 +1,5 @@
 [project]
-sdk_version = "0.8.1.19"
+sdk_version = "0.8.2.95"
 name = "skate3"
 
 [entrypoint]

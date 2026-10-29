@@ -1,4 +1,5 @@
 #include "skate3_title_update_installer.h"
+#include "skate3_xex_version.h"
 
 #include <algorithm>
 #include <array>
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/ui/overlay/acquire_wizard_overlay.h>
 #include <rex/ui/windowed_app_context.h>
@@ -754,8 +756,16 @@ bool DownloadAndStageTitleUpdate(const std::filesystem::path& game_root,
 
 bool IsTitleUpdateInstalled(const std::filesystem::path& game_root) {
   for (const auto& payload : kPayloads) {
+    auto executable = game_root / std::filesystem::path(std::string(payload.staged_path));
+    executable.replace_extension(".xex");
+    const auto info = xex::ReadExecutionInfo(executable);
+    if (!info || info->title_id != xex::kTitleId) return false;
     const auto staged = game_root / std::filesystem::path(std::string(payload.staged_path));
     std::error_code ec;
+    if (info->version == xex::kTitleUpdate3Version &&
+        !std::filesystem::exists(staged, ec) && !ec) continue;
+    if (info->version != xex::kBaseVersion &&
+        info->version != xex::kTitleUpdate3Version) return false;
     if (!std::filesystem::is_regular_file(staged, ec) ||
         std::filesystem::file_size(staged, ec) != payload.size || ec) {
       return false;
@@ -768,6 +778,39 @@ bool IsTitleUpdateInstalled(const std::filesystem::path& game_root) {
     }
   }
   return true;
+}
+
+bool StageTitleUpdateFromDirectory(const std::filesystem::path& source_root,
+                                  const std::filesystem::path& game_root, std::string& error) {
+  std::array<std::vector<uint8_t>, kPayloads.size()> files;
+  for (size_t i = 0; i < kPayloads.size(); ++i) {
+    const auto& payload = kPayloads[i];
+    if (!ReadWholeFile(source_root / std::string(payload.staged_path), files[i], error)) return false;
+    if (files[i].size() != payload.size ||
+        Sha256OfData(files[i].data(), files[i].size()) != payload.sha256) {
+      error = "Bundled title update file does not match TU3: " + std::string(payload.staged_path);
+      return false;
+    }
+  }
+  for (size_t i = 0; i < kPayloads.size(); ++i) {
+    if (!StagePayload(kPayloads[i], files[i], game_root, error)) return false;
+  }
+  if (!IsTitleUpdateInstalled(game_root)) {
+    error = "The installed game files do not match the supported base/TU3 version.";
+    return false;
+  }
+  return true;
+}
+
+bool TryInstallBundledTitleUpdate(const std::filesystem::path& game_root) {
+  std::string error;
+  const auto source = rex::filesystem::GetAppRootFolder() / "title-update";
+  if (StageTitleUpdateFromDirectory(source, game_root, error)) {
+    REXLOG_INFO("Installed bundled Skate 3 Title Update 3 patches");
+    return true;
+  }
+  REXLOG_WARN("Bundled TU3 installation unavailable: {}", error);
+  return false;
 }
 
 bool StageTitleUpdateFromFile(const std::filesystem::path& source,

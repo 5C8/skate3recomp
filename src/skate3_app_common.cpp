@@ -619,7 +619,8 @@ std::optional<rex::PathConfig> Skate3BaseApp::OnFinalizePaths(
       // Chain the title update wizard after the ISO install completes.
       auto resume_after_title_update =
           [this, resume = std::move(resume)](rex::PathConfig paths) mutable {
-            if (!skate3::IsTitleUpdateInstalled(paths.game_data_root)) {
+            if (!skate3::IsTitleUpdateInstalled(paths.game_data_root) &&
+                !skate3::TryInstallBundledTitleUpdate(paths.game_data_root)) {
               skate3::ShowTitleUpdateInstallWizard(imgui_drawer(), std::move(paths),
                                                    std::move(resume));
               return;
@@ -650,7 +651,8 @@ std::optional<rex::PathConfig> Skate3BaseApp::OnFinalizePaths(
   // TU payloads staged next to the installed game files. Existing installs
   // from releases that predate TU support land here with the game present but
   // the title update missing.
-  if (!skate3::IsTitleUpdateInstalled(runtime_paths.game_data_root)) {
+  if (!skate3::IsTitleUpdateInstalled(runtime_paths.game_data_root) &&
+      !skate3::TryInstallBundledTitleUpdate(runtime_paths.game_data_root)) {
     REXLOG_INFO("Skate 3 Title Update 3 not staged at {}; launching title update installer",
                 runtime_paths.game_data_root.string());
 #if defined(__APPLE__)

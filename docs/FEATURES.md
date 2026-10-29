@@ -1,5 +1,15 @@
 # Features and controls
 
+## ISO installation and Title Update 3
+
+Select your retail ISO in setup. Its base game files are extracted, then setup
+validates and installs the two bundled TU3 patch payloads from `title-update/`.
+The loader applies those patches when loading the game and EAWebkit executables.
+The ISO itself is left unchanged. No prepatched XEX or separate update download
+is required by the complete Windows package. Existing TU3 executables are
+recognized, including mixed installations where only EAWebkit needs a patch.
+The game cannot proceed with missing, mismatched or damaged required updates.
+
 ## Rendering and display
 
 The custom/native renderer is enabled by default. **F5** switches between the

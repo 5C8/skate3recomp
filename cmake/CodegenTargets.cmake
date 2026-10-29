@@ -1,3 +1,19 @@
+if(SKATE3_REQUIRE_TITLE_UPDATE)
+    set(_skate3_codegen_game_root "${SKATE3_GAME_DATA_ROOT}")
+    if(TARGET skate3-title-update-codegen-inputs)
+        set(_skate3_codegen_game_root "${SKATE3_TITLE_UPDATE_CODEGEN_ROOT}")
+    endif()
+    add_custom_target(skate3-check-title-update-inputs
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckTitleUpdateInputs.py"
+            --game-root "${_skate3_codegen_game_root}"
+        COMMENT "Checking game images match the TU3 recompilation"
+        VERBATIM)
+    if(TARGET skate3-title-update-codegen-inputs)
+        add_dependencies(skate3-check-title-update-inputs skate3-title-update-codegen-inputs)
+    endif()
+endif()
+
 add_custom_target(generate-skate3
     COMMAND $<TARGET_FILE:rex::rexglue> codegen
             ${SKATE3_CODEGEN_ARGS}
@@ -22,6 +38,10 @@ add_custom_target(generate-eawebkit
 if(TARGET skate3-title-update-codegen-inputs)
     add_dependencies(generate-skate3 skate3-title-update-codegen-inputs)
     add_dependencies(generate-eawebkit skate3-title-update-codegen-inputs)
+endif()
+if(TARGET skate3-check-title-update-inputs)
+    add_dependencies(generate-skate3 skate3-check-title-update-inputs)
+    add_dependencies(generate-eawebkit skate3-check-title-update-inputs)
 endif()
 
 add_dependencies(generate-skate3 generate-eawebkit)

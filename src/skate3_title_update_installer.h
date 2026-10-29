@@ -7,10 +7,14 @@
 
 namespace skate3 {
 
-// True when both title update payloads (default.xexp and
-// data/webkit/EAWebkit.xexp) are staged in game_root and match the pinned
-// SHA-256 hashes the recompilation was generated from.
+// True when each executable is already TU3, or is the base version with its
+// matching, SHA-256-verified TU3 sidecar. Mixed installations are supported.
 bool IsTitleUpdateInstalled(const std::filesystem::path& game_root);
+
+// Validate both bundled payloads before writing either into the installed game.
+bool StageTitleUpdateFromDirectory(const std::filesystem::path& source_root,
+                                  const std::filesystem::path& game_root, std::string& error);
+bool TryInstallBundledTitleUpdate(const std::filesystem::path& game_root);
 
 // Stages the title update payloads into game_root from a local source file:
 // either the TU STFS package (CON/LIVE/PIRS container) or a raw .xexp payload.

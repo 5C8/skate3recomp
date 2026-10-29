@@ -1,5 +1,5 @@
 """Package only runtime files and documentation, never a whole build folder."""
-import argparse, hashlib, json, zipfile
+import argparse, hashlib, json, zipfile, runpy
 from pathlib import Path
 
 root=Path(__file__).resolve().parents[1]
@@ -7,6 +7,7 @@ project='skate3recomp'
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--build-dir',type=Path)
 parser.add_argument('--install-dir',type=Path)
+parser.add_argument('--title-update-dir',type=Path)
 parser.add_argument('--output',required=True,type=Path)
 args=parser.parse_args()
 files={}
@@ -31,6 +32,15 @@ else:
         elif name in required:parser.error('Runtime file missing: '+name)
     if 'mimalloc.dll' in files and 'mimalloc-redirect.dll' not in files:
         parser.error('mimalloc redirect DLL must be included with mimalloc')
+if project=='skate3recomp':
+    if not args.title_update_dir:parser.error('--title-update-dir is required for a TU3 retail release')
+    payloads=runpy.run_path(str(root/'cmake/CheckTitleUpdateInputs.py'))['PAYLOADS']
+    for executable,(size,digest) in payloads.items():
+        relative=str(Path(executable).with_suffix('.xexp')).replace('\\','/')
+        p=args.title_update_dir/relative
+        if not p.is_file() or p.stat().st_size!=size or hashlib.sha256(p.read_bytes()).hexdigest()!=digest:
+            parser.error('Missing or incorrect TU3 payload: '+relative)
+        files['title-update/'+relative]=p
 for directory in ('docs','licenses'):
     for p in (root/directory).rglob('*'):
         if p.is_file():files[p.relative_to(root).as_posix()]=p

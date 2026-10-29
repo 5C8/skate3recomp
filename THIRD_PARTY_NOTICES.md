@@ -14,6 +14,10 @@ SDL3, FFmpeg, Tracy, mimalloc and the SDK's other third-party dependencies. Thei
 licenses apply to the corresponding components. The matching SDK source and
 dependency revisions are available from the companion repository.
 
-Skate 3 and its game assets belong to their respective owners. This is an
-unofficial project, unaffiliated with Electronic Arts or Microsoft. Game files
+Skate 3 and its game assets belong to their respective owners.
+The bundled Title Update 3 patch payloads are Electronic Arts/Xbox update
+material. Their original rights remain with their respective owners; this
+project's source-code notices do not grant a license to that material.
+
+This is an unofficial project, unaffiliated with Electronic Arts or Microsoft. Game files
 required to run/build the project are provided by the user.

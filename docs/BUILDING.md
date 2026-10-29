@@ -1,6 +1,6 @@
 # Building the retail project
 
-Use the matching [5C8 ReXGlue SDK](https://github.com/5C8/rexglue-skate3/releases),
+Use SDK 0.8.2.95 or newer from the matching [5C8 ReXGlue SDK](https://github.com/5C8/rexglue-skate3/releases),
 not an unrelated upstream SDK build. The initial Windows snapshot uses Clang
 23.1.0, CMake 3.25+, Ninja, the Visual Studio C++ build tools and a Windows SDK.
 Run these commands in a developer shell with `clang`, `clang++`, CMake and Ninja
@@ -14,6 +14,18 @@ matching retail game into `game/`, including `default.xex` and
 `data/webkit/EAWebkit.xex`. Obtain the Title Update 3 package from your own
 installation and pass its path below; the release runtime expects TU3. Game
 files and generated implementation stay ignored and are never needed on GitHub.
+
+TU3 is required independently of whether a package path was passed at build
+time (`SKATE3_REQUIRE_TITLE_UPDATE=ON` by default). If your code-generation
+inputs are already TU3, a separate package is optional; every remaining base
+module must have its matching `.xexp`. The codegen preflight checks both modules
+and rejects unpatched inputs. `SKATE3_REQUIRE_TITLE_UPDATE=OFF` is for explicit
+legacy base-game development builds, not this TU3 release.
+
+For distribution, supply the two verified patch files to the release packager
+using `--title-update-dir`; see [RELEASING.md](RELEASING.md). They are included in
+the binary ZIP and installed automatically after ISO extraction. They remain
+excluded from Git source history.
 
 ```powershell
 cmake --preset win-amd64-release -DCMAKE_PREFIX_PATH=C:/Dev/rex-sdk -DSKATE3_GAME_DATA_ROOT=C:/Games/Skate3 -DSKATE3_TITLE_UPDATE_PACKAGE=C:/Games/Skate3-TU3
