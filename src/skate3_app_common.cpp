@@ -117,8 +117,9 @@ REXCVAR_DEFINE_DOUBLE(skate3_ultrawide_target_aspect, 0.0, "Skate 3",
 namespace {
 
 void ApplyDemoPathProfileOverride() {
-  if (!rex::cvar::Query<bool>("skate3_demo_path") &&
-      !rex::cvar::Query<bool>("skate3_demo_path_probe")) {
+  // A logging-only probe must preserve the selected profile. Only explicit
+  // automation may request the signed-out boot used by scripted runs.
+  if (!rex::cvar::Query<bool>("skate3_demo_path")) {
     return;
   }
   if (rex::cvar::Query<bool>("skate3_demo_path_signed_in")) {
@@ -867,8 +868,7 @@ void Skate3BaseApp::OnPostSetup() {
   // holds exactly 16/9).
   Skate3InitGuestAspect(runtime()->memory());
   skate3::demo_path::InstallHooks(dispatcher);
-  // User-facing intro-movie skip (independent of the demo path): the movie
-  // completion override polls the merged UI pad state through this provider.
+  // Shared input provider for host features such as draw-distance controls.
   skate3::demo_path::SetUiInputProvider([this]() {
     return static_cast<rex::input::InputSystem*>(runtime()->input_system());
   });

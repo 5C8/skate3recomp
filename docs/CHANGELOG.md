@@ -1,5 +1,24 @@
 # Release notes
 
+## 1.0.4
+
+- **First-run setup:** remove the forced movie-completion override entirely,
+  including the automation path. Confirmation input after choosing difficulty and
+  camera could prematurely advance the movie state, leaving a broken difficulty
+  screen instead of progressing. The game now controls its movie lifecycle.
+  Existing `skate3_intro_movie_skip = true` configs cannot re-enable the unsafe
+  override. Existing generated builds automatically have the old patch removed.
+- **Profile sign-in during diagnostics:** the frontend logging probe preserves
+  the selected profile. A logging-only run previously inherited automation's
+  signed-out startup unless an additional flag was supplied.
+
+The affected player confirmed that disabling the old movie-skip override allowed
+setup to proceed. The successful log reaches gameplay and opens the save again.
+Regression checks exercise the actual profile callback with normal/probe/automation
+modes and verify that both existing and newly generated builds use the original
+movie call, including when old configs enable the retired flag. No renderer
+or save-file format changes are needed, and existing saves can be kept.
+
 ## 1.0.3
 
 - **Custom-map cutout textures:** preserve diffuse alpha testing on tree,

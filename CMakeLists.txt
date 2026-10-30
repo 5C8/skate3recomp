@@ -11,7 +11,16 @@ if(SKATE3_STATIC_MSVC_RUNTIME)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(skate3 VERSION 1.0.3 LANGUAGES CXX)
+project(skate3 VERSION 1.0.4 LANGUAGES CXX)
+
+# Existing checkouts may still have the retired movie override in generated
+# sources. Repair them before compiling; fresh codegen keeps the original call.
+include(cmake/RemoveLegacyMovieOverride.cmake)
+file(GLOB SKATE3_EXISTING_RECOMP_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/generated/skate3_recomp.*.cpp")
+foreach(SKATE3_EXISTING_RECOMP_SOURCE IN LISTS SKATE3_EXISTING_RECOMP_SOURCES)
+    skate3_remove_legacy_movie_override("${SKATE3_EXISTING_RECOMP_SOURCE}")
+endforeach()
 
 if(WIN32)
     enable_language(RC)
