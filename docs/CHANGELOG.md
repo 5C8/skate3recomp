@@ -1,5 +1,25 @@
 # Release notes
 
+## 1.0.3
+
+- **Custom-map cutout textures:** preserve diffuse alpha testing on tree,
+  animated-tree and alpha-test materials when a specular/normal map is bound.
+  These bindings previously suppressed cutouts, making some custom-map trees,
+  fences and power lines appear solid. Explicit game alpha-test overrides and
+  decal compositing retain their behavior.
+- **Custom-map geometry:** accept vertex buffers with up to 15 trailing bytes
+  of 16-byte allocation padding. San Vanelona uses these buffers extensively;
+  the custom renderer previously rejected them when the allocation size was
+  not an exact multiple of the vertex stride, leaving floors and walls missing.
+  Only complete vertices are decoded.
+
+Regression checks cover real San Vanelona buffer-size/index metadata, malformed
+buffers, optional specular/normal bindings, game alpha-test overrides, and
+character/decal exclusions. An additional local check exercised 969 validated
+mesh records. All 15 Direct3D scene shader variants compiled, and all 106 Vulkan
+variants were regenerated and their binding layouts checked. These are automated
+and captured-data checks; final visual comparisons remain player testing.
+
 ## 1.0.2
 
 - **Board shadows:** extend the custom renderer's board contact shadows to

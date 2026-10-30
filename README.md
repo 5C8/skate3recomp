@@ -11,9 +11,9 @@ It uses the companion [5C8 SDK](https://github.com/5C8/rexglue-skate3).
 
 [**Windows x64 releases**](https://github.com/5C8/skate3recomp/releases/latest)
 
-Version **1.0.2** adds board shadows for online and ambient NPC skaters,
-improves first-run difficulty-menu initialization, and fixes the fullscreen
-settings crash. See the [release notes](docs/CHANGELOG.md).
+Version **1.0.3** fixes missing custom-map geometry caused by padded vertex
+buffers and restores alpha cutouts on tree and alpha-test materials with
+specular maps. See the [release notes](docs/CHANGELOG.md).
 
 1. Download and fully extract **skate3recomp-Windows-x64.zip** from Releases.
 2. Start `skate3.exe` and use the installer to select your own retail Skate 3 ISO.

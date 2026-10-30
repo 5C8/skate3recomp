@@ -1,3 +1,5 @@
+#include "scene_alpha.hlsli"
+
 // Face-normal shading uses the camera-relative world position: interpolating
 // absolute world coordinates (hundreds of meters) destroys ddx/ddy precision
 // and produces per-pixel noise.
@@ -451,7 +453,9 @@ float4 ShadePixel(VSOut i) {
   // zero blend weights, so the VS skinning branch stays off).
   // tint.b < 0: the game's own draw has alpha test OFF (RB_COLORCONTROL,
   // captured per island), so nothing is discarded here.
-  if (tint.g == 0.0 && tint.b >= 0.0 && overlay.w < 0.5 && cam_pos.w > -20.5) {
+  // Explicit cutout families (alphatest / tree / animated.tree) still test
+  // their diffuse alpha when overlay.w marks a bound specular/normal map.
+  if (SceneDiffuseAlphaTestEnabled(tint.g, tint.b, overlay.w, cam_pos.w)) {
     // environment.transparent alpha-tests its SQUARED alpha at ref 16/255
     // (transparentenvironment.xml: ALPHAREF 16, PS outputs a = diffuse.a^2).
     // Exact env families (cam_pos.w < 0) use the game's world ALPHAREF 30.

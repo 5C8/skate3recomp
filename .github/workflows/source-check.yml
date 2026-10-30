@@ -13,3 +13,11 @@ jobs:
         with:
           python-version: '3.12'
       - run: python tools/check_source_contents.py
+      - name: Check native mesh buffer sizes
+        run: |
+          c++ -std=c++20 -Isrc tests/native_mesh_layout_test.cpp -o /tmp/native_mesh_layout_test
+          /tmp/native_mesh_layout_test
+      - name: Check native cutout materials
+        run: |
+          c++ -std=c++20 -Isrc tests/native_scene_alpha_test.cpp -o /tmp/native_scene_alpha_test
+          /tmp/native_scene_alpha_test

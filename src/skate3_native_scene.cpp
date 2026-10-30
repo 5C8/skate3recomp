@@ -45,6 +45,7 @@
 #include "native/skate3_flat_map.h"
 #include "native/skate3_native_guest_read.h"
 #include "native/skate3_native_lw.h"
+#include "native/skate3_native_mesh_layout.h"
 #include "native/skate3_native_palette.h"
 // Offline-compiled SPIR-V for the native shaders (compiled from the HLSL
 // sources with DXC): the Vulkan RHI backend consumes these blobs; the D3D12
@@ -2105,8 +2106,8 @@ bool BuildItemFromMesh(uint8_t* base, uint32_t mesh, DrawItem& item) {
   item.vb_bytes = BSwap32(vb_words[2]);
   item.ib_addr = BSwap32(ib_words[0]) & 0xFFFFFFFC;
   item.ib_count = BSwap32(ib_words[2]);
-  if (item.vb_addr == 0 || item.ib_addr == 0 || item.vb_bytes == 0 ||
-      item.ib_count == 0 || item.vb_bytes % item.stride != 0) {
+  if (item.vb_addr == 0 || item.ib_addr == 0 || item.ib_count == 0 ||
+      !ValidVertexBufferSize(item.vb_bytes, item.stride)) {
     g_rej_geom.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
