@@ -47,6 +47,10 @@ Open Settings with **Escape/F1** or **RB + Start**. To launch split screen, run
 `skate3.exe --splitscreen`, assign connected controllers to screens, then select
 different profiles and host/join a compatible online session.
 
+**SteamVR startup:** in Steam, right-click the game's Library entry and open
+**Properties > Launch Options**, then enter `--skate3_vr=true` before launching.
+See the [SteamVR setup guide](docs/FEATURES.md#steamvr) for the full steps.
+
 ## Online server
 
 5C8's community Blaze server: **`129.151.200.180`**.

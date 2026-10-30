@@ -80,13 +80,30 @@ simulation or a replacement for the multiplayer server.
 
 ## SteamVR
 
-The Windows packages include the OpenVR runtime. Install/start SteamVR, connect
-your headset, and enable VR in Settings. The VR page controls eye resolution,
-MSAA, world scale, horizon/position tracking, HUD placement/curvature and camera
-behavior. Controller settings include motion-controller bindings and body yaw.
-The settings page describes the recenter shortcut. Start at a modest eye scale
-and raise it after checking frame rate; VR renders two views. Flat play does not
-require SteamVR.
+**Required Steam launch option:** `--skate3_vr=true`. Without this option,
+the game starts in flat mode rather than booting into VR.
+
+1. Install/start SteamVR and connect your headset.
+2. Add `skate3.exe` to your Steam Library as a **Non-Steam Game**, if you
+   have not already added it.
+3. In your Steam Library, right-click that game entry, open **Properties**,
+   and enter the following in **Launch Options**:
+
+   ```text
+   --skate3_vr=true
+   ```
+
+   Enter only the option above in that field. If you already use other launch
+   options, add this one separated by a space.
+4. Close Properties and launch the game from Steam. Use **DirectX 12** with
+   the custom/native renderer for VR.
+
+The Windows packages include the OpenVR runtime. Once in VR, the in-game VR
+settings control eye resolution, MSAA, world scale, horizon/position tracking,
+HUD placement/curvature and camera behavior. Controller settings include
+motion-controller bindings and body yaw. The settings page describes the
+recenter shortcut. Start at a modest eye scale and raise it after checking
+frame rate; VR renders two views. Flat play does not require SteamVR.
 
 ## Files, saves and diagnostics
 
