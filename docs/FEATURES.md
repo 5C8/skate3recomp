@@ -100,8 +100,7 @@ the game starts in flat mode rather than booting into VR.
 
 The Windows packages include the OpenVR runtime. Once in VR, the in-game VR
 settings control eye resolution, MSAA, world scale, horizon/position tracking,
-HUD placement/curvature and camera behavior. The settings page describes the
-recenter shortcut. Start at a modest eye scale and raise it after checking
+HUD placement/curvature and camera behavior. Start at a modest eye scale and raise it after checking
 frame rate; VR renders two views. Flat play does not require SteamVR.
 
 ## Files, saves and diagnostics
