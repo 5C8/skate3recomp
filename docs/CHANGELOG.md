@@ -2,6 +2,23 @@
 
 ## 1.0.5
 
+- **Board stickers:** draw deck stickers in the custom renderer. The game
+  renders them through a separate `character.shift` material that samples the
+  graphic from its own texture with a dedicated UV transform. That texture and
+  placement are now captured and composited in the character shader; the
+  earlier `default_skateboard` decal path is removed.
+- **Printed shirt logos:** draw printed garment graphics from the game's
+  `cacstamp_cloth` stamp texture and placement, separately from the cloth dirt
+  layer. ROPA stamp shaders use their own placement rows.
+- **Custom team-logo tattoos:** match the game's tattoo blend, which uses the
+  logo's alpha to blend its colour against neutral white before applying it to
+  the skin. Transparent areas of custom logos no longer appear as a dark
+  backing; opaque tattoos are unchanged.
+- **Live Sign In:** add a Live Sign In checkbox to Settings > Online. It shows
+  and changes the selected profile's `live_signed_in` value and applies on the
+  next launch. A profile saved with this off signs in locally only, so the game
+  reports that an Xbox LIVE sign-in is required and online play is unavailable.
+  The row's reset action turns it on.
 - **Animated tree leaves:** reproduce the game's `treeanimate_defaultVS`
   sway in the custom renderer. The renderer now uses the animated-tree
   vertices' wind seeds and the live shader constants, so these leaves move

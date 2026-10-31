@@ -80,8 +80,9 @@ Texture2D<float2> static_sun : register(t10);
 // The game's deck-shadow decal: a static 64x128 5_6_5 blob, WHITE at the
 // border and dark in the centre, so it modulates (postfx_deck_AO's combine).
 Texture2D<float4> deck_decal : register(t11);
-// decal2environment's second decal art (the game's tf5; fifth entry of the
-// t8 table). Only sampled when misc.y >= 256 (layer bound, fam 3).
+// decal2environment's second decal art, character.shift's board graphic, or
+// cacstamp_cloth's shirt stamp (fifth entry of the t8 table); branches sample
+// only when their per-draw selector is set.
 Texture2D<float4> decal_art2 : register(t12);
 // Raw bone palette: 3 float4 rows per bone, column-vector affine [R | t],
 // applied with explicit dots (StructuredBuffer<float4x4> default packing is
@@ -185,18 +186,22 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
     n = mul(n, (float3x3)world);
     vb = mul(vb, (float3x3)world);
   }
-  // Port of treeanimate_defaultVS from its original ucode. UV1.zw carry
-  // per-vertex wind seeds; c7..c10 are captured from the game's live draw.
-  // The ucode's literal pool supplies -pi and 2*pi, hence the wrapped phase.
+  // treeanimate_defaultVS (original ucode lines 7-20): UV1.zw are the
+  // authored per-vertex wind seeds (r3.zw), while c7.x is the game's
+  // animation clock and c8.w/c9/c10 shape the three-axis sway. The literal
+  // pool in vs_treeanimate_defaultVS.updb@32 is c254=(-pi,2pi,0,0) and
+  // c255=(-0.5,0.5,1,1/(2pi)). The Xenos position registers are permuted
+  // before the game's c0-c3 transform; mapped back to our native xyz this
+  // displacement is (dx,dz,dy).
   if (cam_pos.w < -9.5 && cam_pos.w > -10.5 && tree_anim[1].w > 0.0) {
     const float seed_x = uv3.x - 0.5;
     const float seed_y = uv3.y - 0.5;
     const float seed_z = uv3.x + uv3.y - 1.0;
     const float3 seed = float3(seed_x, seed_y, seed_z);
-    const float3 noise = (tree_anim[0].x - seed) * tree_anim[2].xyz +
-                         seed * tree_anim[3].xyz;
-    const float3 phase = frac(noise * 0.159154943091895 + 0.5) *
-                         6.283185307179586 - 3.141592653589793;
+    float3 noise = (tree_anim[0].x - seed) * tree_anim[2].xyz +
+                   seed * tree_anim[3].xyz;
+    float3 phase = frac(noise * 0.159154943091895 + 0.5) * 6.283185307179586 -
+                   3.141592653589793;
     const float3 wave = sin(phase);
     const float dx = tree_anim[1].w * seed_x * wave.x;
     const float dy = seed_z * tree_anim[3].w * wave.z;

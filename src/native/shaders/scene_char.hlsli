@@ -83,6 +83,29 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
   if (fam > 7.5 && fam < 8.5) {
     return ShadeHom(i, albedo);
   }
+  // cacstamp_shift_defaultPS samples the board graphic at tf5 using the
+  // c190/c191 UV transform emitted by the shift vertex shader. The game
+  // composites the raw art RGB over its squared, modulated diffuse.
+  float4 shift_art = float4(0.0, 0.0, 0.0, 0.0);
+  if (fam > 1.5 && fam < 2.5 && overlay.w > 6.5 && overlay.w < 7.5) {
+    const float3 uvw = float3(i.uv2, 1.0);
+    const float2 cg = float2(dot(uvw, mat_tint.xyz),
+                             dot(uvw, float3(mat_tint.w, misc.z, misc.w)));
+    if (all(cg >= 0.0) && all(cg <= 1.0)) {
+      shift_art = decal_art2.Sample(smp_clamp, cg);
+    }
+  }
+  // Printed garments use a separate cacstamp_cloth tf5 stamp. misc.x selects
+  // it while overlay.w remains available for the independent tf6 dirt layer.
+  float4 cloth_stamp = float4(0.0, 0.0, 0.0, 0.0);
+  if (fam > 1.5 && fam < 2.5 && misc.x > 0.5 && misc.x < 1.5) {
+    const float3 uvw = float3(i.uv2, 1.0);
+    const float2 cg = float2(dot(uvw, mat_tint.xyz),
+                             dot(uvw, float3(mat_tint.w, misc.z, misc.w)));
+    if (all(cg >= 0.0) && all(cg <= 1.0)) {
+      cloth_stamp = decal_art2.Sample(smp_clamp, cg);
+    }
+  }
   float3 dlin = albedo.rgb * albedo.rgb;
   float3 cn = dot(i.nrm, i.nrm) > 0.01
                   ? normalize(i.nrm)
@@ -404,11 +427,20 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
     if (ch_tintA.w > 0.0) {
       dlin *= ch_tintA.rgb;
     }
+    if (shift_art.a > 0.0) {
+      dlin = lerp(dlin, shift_art.rgb, shift_art.a);
+    }
+    if (cloth_stamp.a > 0.0) {
+      dlin = lerp(dlin, cloth_stamp.rgb, cloth_stamp.a);
+    }
     // CAS skin custom graphic (cacstamp_skin_defaultPS lines 10/18-24):
     // the squared, tinted diffuse times the material's "decal" texture
     // (tf6, bound at t1, overlay.x = 1) at the VS-placed second texcoord
     // (vs_cacstamp_skin_defaultVS 40/41: dot((u,v,1), c190.xyz) and
     // dot((u,v,1), c191.xyz); rows in mat_tint.xyz / mat_tint.w + misc.zw).
+    // tf6 alpha blends its RGB against neutral white before multiplying the
+    // diffuse: the ucode computes 1 + (tf6.rgb - 1) * tf6.a. Ignoring alpha
+    // turns transparent pixels in custom team-logo tattoos into dark ink.
     // tf6 clamps to a WHITE border, so only the placed rectangle carries
     // the graphic.
     // Face injury layer (cac_face_{default,nis}PS lines 12/20-23): the
@@ -423,7 +455,8 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
       const float2 cg = float2(dot(uvw, mat_tint.xyz),
                                dot(uvw, float3(mat_tint.w, misc.z, misc.w)));
       if (all(cg >= 0.0) && all(cg <= 1.0)) {
-        dlin *= lightmap.Sample(smp_clamp, cg).rgb;
+        const float4 tattoo = lightmap.Sample(smp_clamp, cg);
+        dlin *= lerp(float3(1.0, 1.0, 1.0), tattoo.rgb, tattoo.a);
       }
     }
     // CAC skin body injury layer (cacstamp_skin_{default,nis}PS 13/18-28):

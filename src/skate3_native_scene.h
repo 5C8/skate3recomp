@@ -449,12 +449,19 @@ struct DrawItem {
   // reads its tf6 (the skater's injury map) only through a c22.z lerp,
   // non-zero once the skater is bruised (see face_inj_*).
   bool char_skin = false;
-  // The skin draw's c190/c191 rows (xyz each) at the served pose's main
-  // pass (see char_skin); char_cg_valid = captured this frame.
+  // character.shift (cacstamp_shift_defaultPS): the board graphic is the
+  // draw-time tf5 texture sampled at the VS-placed uv2 (c190/c191).
+  bool char_shift = false;
+  // character.cloth (cacstamp_cloth_*PS): the printed shirt/logo uses tf5
+  // at c190/c191-transformed uv2; its dirt layer remains a separate tf6.
+  bool char_cloth_stamp = false;
+  // Custom stamp c190/c191 rows (xyz each) at the served pose's main pass
+  // (skin tattoo, board graphic, or printed-cloth logo); char_cg_valid means
+  // the per-draw binding was captured recently.
   float char_cg[6] = {};
   bool char_cg_valid = false;
-  // The skin draw's tf6 fetch words: the CAS-chosen graphic, bound by the
-  // engine at draw time (the material's decal channel is NOT it).
+  // The skin/shift/cloth stamp fetch words (tf6 for tattoo, tf5 for board or
+  // shirt art), bound by the engine at draw time.
   uint32_t char_cg_fetch[6] = {};
   // character.face (cac_face_*PS): the face piece (see sss_*).
   bool char_face = false;
@@ -468,6 +475,7 @@ struct DrawItem {
   uint32_t char_layer_fetch[6] = {};
   float char_layer_amount = 0.0f;
   bool char_layer_valid = false;
+  uint32_t char_layer_slot = 0;
   // CAS subsurface scattering (see g_frame_skin_sss): the game ran this
   // piece's texture-space lighting pass within the last couple of builds;
   // sss_mask = its main pass's "blurmask" fetch words (face tf7, skin tf8),
@@ -733,8 +741,10 @@ struct FrameScene {
   // [2] = tree PS c4.y (tint multiplier), [3] = proxyworld PS c3.y (0.45).
   // Defaults from the day capture cover frames before the first hit.
   float family_rows[4] = {0.3435f, 0.02f, 1.0f, 0.45f};
-  float tree_anim_rows[16] = {};
+  // treeanimate_defaultVS c7..c10 (time/noise/wind rows) captured from the
+  // game's own VS bank. Used only by animated.tree vertex deformation.
   bool tree_anim_valid = false;
+  float tree_anim_rows[16] = {};
   // flowingwateralpha.fx (the water.flowing* materials) m_params rows,
   // captured once per frame from a flowingwateralpha PS bank (debug-path
   // classified): [0..3] = m_params[0] (PS c11: normal scale xzw + the

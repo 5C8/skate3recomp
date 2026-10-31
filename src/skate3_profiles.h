@@ -77,6 +77,8 @@ bool SignInAtBoot(rex::ui::WindowedAppContext& app_context, rex::ui::Window* win
 
 // Runtime edits from the settings menu.
 std::string SelectedGamertag(const std::filesystem::path& store_path);
+bool LiveSignIn(const std::filesystem::path& store_path);
+void SetLiveSignIn(const std::filesystem::path& store_path, bool enabled);
 // Renames the signed-in profile (id and XUID unchanged); false if the name is
 // empty after sanitizing. Applies the cvars; the running game keeps the old
 // name until restart.

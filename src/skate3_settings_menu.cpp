@@ -1058,6 +1058,7 @@ void SettingsMenu::LoadSettingsFromCvars() {
   // auto sign-in switch.
   CopyToBuffer(username_buf_, sizeof(username_buf_),
                profiles::SelectedGamertag(env_.profiles_path));
+  live_sign_in_ = profiles::LiveSignIn(env_.profiles_path);
   auto_sign_in_ = profiles::AutoSignIn(env_.profiles_path);
 }
 
@@ -1792,6 +1793,28 @@ void SettingsMenu::BuildRows(std::vector<RowSpec>& rows, int category) {
           // Show what was stored (sanitized), or the old name if rejected.
           CopyToBuffer(username_buf_, sizeof(username_buf_),
                        profiles::SelectedGamertag(env_.profiles_path));
+        };
+        rows.push_back(std::move(row));
+      }
+      {
+        RowSpec row;
+        row.kind = RowSpec::kEnum;
+        row.label = "Live Sign In";
+        row.desc =
+            "Sign the selected profile into Xbox Live so Skate 3 allows online "
+            "features. If off, the profile is local-only and the game may ask "
+            "you to sign in. Applies next launch.";
+        row.value_note = kNextLaunch;
+        row.options = {"Off", "On"};
+        row.flag = &live_sign_in_;
+        row.checkbox = true;
+        row.on_enum_change = [this](int value) {
+          live_sign_in_ = value != 0;
+          profiles::SetLiveSignIn(env_.profiles_path, live_sign_in_);
+        };
+        row.reset = [this] {
+          live_sign_in_ = true;
+          profiles::SetLiveSignIn(env_.profiles_path, true);
         };
         rows.push_back(std::move(row));
       }

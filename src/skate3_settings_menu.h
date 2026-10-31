@@ -139,6 +139,7 @@ class SettingsMenu final : public rex::ui::ImGuiDialog {
   // Online tab text fields (custom server address, profile gamertag).
   char server_buf_[64] = {};
   char username_buf_[32] = {};
+  bool live_sign_in_ = true;
   bool auto_sign_in_ = true;
 
   // Navigation state.
