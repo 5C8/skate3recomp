@@ -192,4 +192,6 @@ cbuffer S : register(b1) {
   float4 fp_head; // 972: local first-person head centre and exclusion radius
   // All seven SkaterPresentation slots, four rows per board.
   float4 deck_rows[28]; // 976..1087
+  // treeanimate_defaultVS c7..c10: live time and per-material sway rows.
+  float4 tree_anim[4]; // 1088..1103
 };

@@ -1,5 +1,13 @@
 # Release notes
 
+## 1.0.5
+
+- **Animated tree leaves:** reproduce the game's `treeanimate_defaultVS`
+  sway in the custom renderer. The renderer now uses the animated-tree
+  vertices' wind seeds and the live shader constants, so these leaves move
+  with the game's per-frame animation instead of remaining static. This is
+  supported by both Direct3D 12 and Vulkan paths.
+
 ## 1.0.4
 
 - **First-run setup:** remove the forced movie-completion override entirely,

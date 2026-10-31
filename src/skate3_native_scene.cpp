@@ -6805,6 +6805,32 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
   // The bank / PS-bank / pending-fixup reads below are raw loads; recover
   // read faults for the whole post-draw path (POSIX; no-op on Windows).
   GuestReadRecoveryScope guest_read_recovery(base);
+  // treeanimate_defaultVS c7..c10 are live draw inputs (c7.x is the game's
+  // animation clock), not fixed source constants. Shader trackers can be
+  // swapped by the SetShader hook, so check both bound object names.
+  if (flags2d == 0 && func == 0) {
+    static std::unordered_map<uint32_t, bool> s_tree_vs_objects;
+    const auto is_tree_vs = [&](uint32_t obj) {
+      const auto found = s_tree_vs_objects.find(obj);
+      if (found != s_tree_vs_objects.end()) return found->second;
+      const bool match = ShaderLeafName(base, obj) == "treeanimate_defaultVS";
+      if (s_tree_vs_objects.size() < 4096) s_tree_vs_objects.emplace(obj, match);
+      return match;
+    };
+    const uint32_t vs_obj = g_cur_vs_obj.load(std::memory_order_relaxed);
+    const uint32_t ps_obj = g_cur_ps_obj.load(std::memory_order_relaxed);
+    if (is_tree_vs(vs_obj) || is_tree_vs(ps_obj)) {
+      float rows[16];
+      for (uint32_t r = 0; r < 4; ++r) {
+        for (uint32_t c = 0; c < 4; ++c) {
+          rows[r * 4 + c] = LoadGuestF32(base, bank + ((7 + r) * 4 + c) * 4);
+        }
+      }
+      std::lock_guard<std::mutex> lock(g_tree_anim_mutex);
+      std::memcpy(g_tree_anim_rows, rows, sizeof(rows));
+      g_tree_anim_have = true;
+    }
+  }
   // The VS bank is fixed for the whole post-draw path: classify it once.
   const bool bank_ortho = BankIsOrtho(base, bank);
   if (g_draw_sect_on) {
@@ -15691,6 +15717,14 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
     std::memcpy(&scene.skin_blur_c0[1], &by, 4);
   }
   std::memcpy(scene.family_rows, g_family_rows, sizeof(g_family_rows));
+  {
+    std::lock_guard<std::mutex> lock(g_tree_anim_mutex);
+    if (g_tree_anim_have) {
+      std::memcpy(scene.tree_anim_rows, g_tree_anim_rows,
+                  sizeof(scene.tree_anim_rows));
+      scene.tree_anim_valid = true;
+    }
+  }
   for (int m = 0; m < 2; ++m) {
     if (g_park_have[m]) {
       std::memcpy(scene.park_rows[m], g_park_rows[m], sizeof(g_park_rows[m]));
