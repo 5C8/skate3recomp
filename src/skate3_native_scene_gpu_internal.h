@@ -1151,7 +1151,7 @@ struct RendererState {
   // normal maps observed in one canal), so the slice carries EIGHT 56-float
   // sets at float 256..703, indexed per draw by misc.z.
   // Includes the seven board placements appended after the shared frame rows.
-  static constexpr uint32_t kShadowCbSlice = 4352;
+  static constexpr uint32_t kShadowCbSlice = 4608;
   nrhi::Buffer* shadow_cb = nullptr;
   uint8_t* shadow_cb_cpu = nullptr;
   // Native static sun-shadow map: a single camera-centered ortho depth map

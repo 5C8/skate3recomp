@@ -1177,6 +1177,15 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
       decode_uv(lit_fmt, lit_off, dst[v * 14 + 3], dst[v * 14 + 4]);
       decode_uv(unlit_fmt, unlit_off, dst[v * 14 + 12], dst[v * 14 + 13]);
     }
+    // treeanimate_defaultVS reads UV1.zw as its authored wind seed. Keep
+    // those signed-normalized components in TEXCOORD2 for the VS port.
+    if (item.env_family == 10 && item.uv2_fmt == 26) {
+      const uint8_t* q = src_vb + size_t(v) * item.stride + item.uv2_offset + 4;
+      dst[v * 14 + 12] = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q))) /
+                         32767.0f;
+      dst[v * 14 + 13] = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2))) /
+                         32767.0f;
+    }
     // Vertex normal: k_10_11_11 packed (x 11 bits, y 11 bits, z 10 bits,
     // LSB to MSB, signed). Zero when absent -> derivative face-normal
     // fallback in the shader.
@@ -12658,6 +12667,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cb[38] = scene.fog_ramp[2];
       cb[39] = scene.family_rows[3];  // proxyworld scale (proxy PS c3.y)
       std::memcpy(cb + 40, scene.fog_color, 4 * sizeof(float));
+    }
+    if (scene.tree_anim_valid) {
+      std::memcpy(cb + 1088, scene.tree_anim_rows,
+                  sizeof(scene.tree_anim_rows));
     }
     // World-shading v2 row (sh_v2, cb[60..63]): x = stored-tangent
     // polarity, yzw = the build-up showcase split state (stage left/right

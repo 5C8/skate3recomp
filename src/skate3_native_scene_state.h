@@ -383,6 +383,11 @@ inline uint64_t g_shadow_rows_frame = 0;
 // FrameScene::family_rows), captured from their PS banks when a draw with
 // the matching debug path runs. Guest render thread only.
 inline float g_family_rows[4] = {0.3435f, 0.02f, 1.0f, 0.45f};
+// treeanimate_defaultVS c7..c10 captured from the game's live draw bank.
+// Guest render thread publishes these once per animated-tree draw.
+inline std::mutex g_tree_anim_mutex;
+inline float g_tree_anim_rows[16] = {};
+inline bool g_tree_anim_have = false;
 inline bool g_tree_frame_done = false;
 inline bool g_proxy_frame_done = false;
 // flowingwateralpha m_params + animation-time rows (see

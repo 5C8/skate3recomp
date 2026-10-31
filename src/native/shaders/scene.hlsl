@@ -185,6 +185,24 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
     n = mul(n, (float3x3)world);
     vb = mul(vb, (float3x3)world);
   }
+  // Port of treeanimate_defaultVS from its original ucode. UV1.zw carry
+  // per-vertex wind seeds; c7..c10 are captured from the game's live draw.
+  // The ucode's literal pool supplies -pi and 2*pi, hence the wrapped phase.
+  if (cam_pos.w < -9.5 && cam_pos.w > -10.5 && tree_anim[1].w > 0.0) {
+    const float seed_x = uv3.x - 0.5;
+    const float seed_y = uv3.y - 0.5;
+    const float seed_z = uv3.x + uv3.y - 1.0;
+    const float3 seed = float3(seed_x, seed_y, seed_z);
+    const float3 noise = (tree_anim[0].x - seed) * tree_anim[2].xyz +
+                         seed * tree_anim[3].xyz;
+    const float3 phase = frac(noise * 0.159154943091895 + 0.5) *
+                         6.283185307179586 - 3.141592653589793;
+    const float3 wave = sin(phase);
+    const float dx = tree_anim[1].w * seed_x * wave.x;
+    const float dy = seed_z * tree_anim[3].w * wave.z;
+    const float dz = seed_y * tree_anim[2].w * wave.y;
+    mp.xyz += float3(dx, dz, dy);
+  }
   o.pos = mul(mp, mvp);
   o.rpos = mul(mp, world).xyz - cam_pos.xyz;
   o.uv = uv;

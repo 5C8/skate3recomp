@@ -733,6 +733,8 @@ struct FrameScene {
   // [2] = tree PS c4.y (tint multiplier), [3] = proxyworld PS c3.y (0.45).
   // Defaults from the day capture cover frames before the first hit.
   float family_rows[4] = {0.3435f, 0.02f, 1.0f, 0.45f};
+  float tree_anim_rows[16] = {};
+  bool tree_anim_valid = false;
   // flowingwateralpha.fx (the water.flowing* materials) m_params rows,
   // captured once per frame from a flowingwateralpha PS bank (debug-path
   // classified): [0..3] = m_params[0] (PS c11: normal scale xzw + the
