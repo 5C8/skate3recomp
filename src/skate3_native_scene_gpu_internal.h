@@ -1150,7 +1150,8 @@ struct RendererState {
   // MATERIAL and a level shows several water surfaces at once (five distinct
   // normal maps observed in one canal), so the slice carries EIGHT 56-float
   // sets at float 256..703, indexed per draw by misc.z.
-  // Includes the seven board placements appended after the shared frame rows.
+  // Includes the seven board placements and treeanimate vertex rows appended
+  // after the shared frame rows (1104 floats, rounded to the 256-byte CBV size).
   static constexpr uint32_t kShadowCbSlice = 4608;
   nrhi::Buffer* shadow_cb = nullptr;
   uint8_t* shadow_cb_cpu = nullptr;

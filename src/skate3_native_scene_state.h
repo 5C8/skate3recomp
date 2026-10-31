@@ -383,8 +383,9 @@ inline uint64_t g_shadow_rows_frame = 0;
 // FrameScene::family_rows), captured from their PS banks when a draw with
 // the matching debug path runs. Guest render thread only.
 inline float g_family_rows[4] = {0.3435f, 0.02f, 1.0f, 0.45f};
-// treeanimate_defaultVS c7..c10 captured from the game's live draw bank.
-// Guest render thread publishes these once per animated-tree draw.
+// treeanimate_defaultVS c7..c10, refreshed from the actual animated-tree
+// draw bank and copied into FrameScene. The first row's x component is the
+// game's animation time; the remaining rows define the sway field.
 inline std::mutex g_tree_anim_mutex;
 inline float g_tree_anim_rows[16] = {};
 inline bool g_tree_anim_have = false;
@@ -565,6 +566,20 @@ struct SkinGraphic {
   uint32_t tf6[6];
 };
 inline std::unordered_map<uint64_t, SkinGraphic> g_frame_skin_graphic;
+// (ib_obj << 32 | vb_obj) -> the board's selected graphic at the last
+// cacstamp_shift main-pass draw: c190/c191 placement plus tf5 fetch words.
+struct ShiftGraphic {
+  float cg[6];
+  uint32_t tf5[6];
+};
+inline std::unordered_map<uint64_t, ShiftGraphic> g_frame_shift_graphic;
+// CAC printed garments use their own tf5 artwork sampler and c190/c191
+// placement, independent of both the skin tattoo and its tf7 injury layer.
+struct ClothStampGraphic {
+  float cg[6];
+  uint32_t tf5[6];
+};
+inline std::unordered_map<uint64_t, ClothStampGraphic> g_frame_cloth_stamp_graphic;
 // (ib_obj << 32 | vb_obj) -> the face injury layer at this frame's last
 // cac_face_{default,nis}PS main-pass draw with those buffers: tf6 = the
 // skater's injury map (bruises / scrapes: rgb colour, a mask) and PS c22.z
@@ -587,6 +602,7 @@ inline std::unordered_map<uint64_t, FaceInjury> g_frame_face_injury;
 struct CharLayer {
   uint32_t words[6];
   float amount;
+  uint32_t slot;
 };
 inline std::unordered_map<uint64_t, CharLayer> g_frame_char_layer;
 // (ib_obj << 32 | vb_obj) -> the CAS subsurface-scattering state of those

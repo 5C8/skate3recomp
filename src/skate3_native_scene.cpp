@@ -2128,8 +2128,11 @@ bool BuildItemFromMesh(uint8_t* base, uint32_t mesh, DrawItem& item) {
   item.char_face = false;
   item.face_inj_valid = false;
   item.char_layer_valid = false;
+  item.char_layer_slot = 0;
   item.sss = false;
   item.char_cg_valid = false;
+  item.char_shift = false;
+  item.char_cloth_stamp = false;
   item.hair_alpha_tex = 0;
   item.dirt_tex = 0;
   item.ropa = false;
@@ -2319,6 +2322,10 @@ bool BuildItemFromMesh(uint8_t* base, uint32_t mesh, DrawItem& item) {
               // DrawItem::char_skin).
               item.char_skin = item.char_family == 2 &&
                                std::memcmp(sub, "skin", 4) == 0;
+              item.char_shift = item.char_family == 2 &&
+                                std::memcmp(sub, "shift", 6) == 0;
+              item.char_cloth_stamp = item.char_family == 2 &&
+                                      std::memcmp(sub, "cloth_stamp", 11) == 0;
               item.char_face = item.char_family == 2 &&
                                std::memcmp(sub, "face", 4) == 0;
             }
@@ -6079,6 +6086,12 @@ enum : uint32_t {
   kCsStampClothRopa = 1u << 7,     // "cacstamp_cloth_ropa_default"
   kCsStampSkinDefault = 1u << 8,   // "cacstamp_skin_default"
   kCsStampSkinNis = 1u << 9,       // "cacstamp_skin_nis"
+  kCsStampShift = 1u << 10,        // "cacstamp_shift"
+  kCsStampClothNis = 1u << 11,     // "cacstamp_cloth_nis"
+  kCsStampClothRopaNis = 1u << 12, // "cacstamp_cloth_ropa_nis"
+  kCsStampClothSkatepark = 1u << 13, // "cacstamp_cloth_skatepark"
+  kCsStampClothRopaSkatepark = 1u << 14, // "cacstamp_cloth_ropa_skatepark"
+  kCsStampSkinSkatepark = 1u << 15, // "cacstamp_skin_skatepark"
 };
 uint32_t CharShaderFlagsOf(uint8_t* base, uint32_t obj) {
   if (obj < 0x10000) {
@@ -6111,10 +6124,23 @@ uint32_t CharShaderFlagsOf(uint8_t* base, uint32_t obj) {
         {"cacstamp_cloth_ropa_default", kCsStampClothRopa},
         {"cacstamp_skin_default", kCsStampSkinDefault},
         {"cacstamp_skin_nis", kCsStampSkinNis},
+        {"cacstamp_shift", kCsStampShift},
+        {"cacstamp_cloth_nis", kCsStampClothNis},
+        {"cacstamp_cloth_ropa_nis", kCsStampClothRopaNis},
+        {"cacstamp_cloth_skatepark", kCsStampClothSkatepark},
+        {"cacstamp_cloth_ropa_skatepark", kCsStampClothRopaSkatepark},
+        {"cacstamp_skin_skatepark", kCsStampSkinSkatepark},
     };
     for (const auto& n : kNeedles) {
       if (std::strstr(name, n.needle) != nullptr) {
         bits |= n.bit;
+      }
+    }
+    if (std::strstr(name, "cacstamp") != nullptr) {
+      static std::atomic<uint32_t> s_stamp_shader_probe{0};
+      if (s_stamp_shader_probe.fetch_add(1, std::memory_order_relaxed) < 128) {
+        REXLOG_INFO("native-scene: stamp shader probe obj={:08X} flags={:04X} path='{}'",
+                    obj, bits, name);
       }
     }
   }
@@ -6805,10 +6831,12 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
   // The bank / PS-bank / pending-fixup reads below are raw loads; recover
   // read faults for the whole post-draw path (POSIX; no-op on Windows).
   GuestReadRecoveryScope guest_read_recovery(base);
-  // treeanimate_defaultVS c7..c10 are live draw inputs (c7.x is the game's
-  // animation clock), not fixed source constants. Shader trackers can be
-  // swapped by the SetShader hook, so check both bound object names.
+  // treeanimate_defaultVS c7..c10 are draw-time inputs (c7.x is the game's
+  // animation clock), not fixed source constants. Preserve the current
+  // values for FrameScene. The two shader-object trackers can be swapped by
+  // the SetShader hook, so test both names.
   if (flags2d == 0 && func == 0) {
+    static std::atomic<bool> tree_anim_logged{false};
     static std::unordered_map<uint32_t, bool> s_tree_vs_objects;
     const auto is_tree_vs = [&](uint32_t obj) {
       const auto found = s_tree_vs_objects.find(obj);
@@ -6826,9 +6854,35 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
           rows[r * 4 + c] = LoadGuestF32(base, bank + ((7 + r) * 4 + c) * 4);
         }
       }
-      std::lock_guard<std::mutex> lock(g_tree_anim_mutex);
-      std::memcpy(g_tree_anim_rows, rows, sizeof(rows));
-      g_tree_anim_have = true;
+      {
+        std::lock_guard<std::mutex> lock(g_tree_anim_mutex);
+        std::memcpy(g_tree_anim_rows, rows, sizeof(rows));
+        g_tree_anim_have = true;
+      }
+      if (!tree_anim_logged.exchange(true, std::memory_order_relaxed)) {
+        float r[9][4] = {};
+        for (uint32_t i = 0; i < 7; ++i) {
+          for (uint32_t c = 0; c < 4; ++c) {
+            r[i][c] = LoadGuestF32(base, bank + ((4 + i) * 4 + c) * 4);
+          }
+        }
+        for (uint32_t i = 0; i < 2; ++i) {
+          for (uint32_t c = 0; c < 4; ++c) {
+            r[7 + i][c] = LoadGuestF32(base, bank + ((254 + i) * 4 + c) * 4);
+          }
+        }
+        REXLOG_INFO("native-scene: treeanimate VS capture vs_obj={:08X} ps_obj={:08X} "
+                    "c4=({:.6g},{:.6g},{:.6g},{:.6g}) c5=({:.6g},{:.6g},{:.6g},{:.6g}) "
+                    "c6=({:.6g},{:.6g},{:.6g},{:.6g}) c7=({:.6g},{:.6g},{:.6g},{:.6g}) "
+                    "c8=({:.6g},{:.6g},{:.6g},{:.6g}) c9=({:.6g},{:.6g},{:.6g},{:.6g}) "
+                    "c10=({:.6g},{:.6g},{:.6g},{:.6g}) uploaded c254/c255=zero; "
+                    "ucode literal pool supplies them",
+                    vs_obj, ps_obj,
+                    r[0][0],r[0][1],r[0][2],r[0][3],r[1][0],r[1][1],r[1][2],r[1][3],
+                    r[2][0],r[2][1],r[2][2],r[2][3],r[3][0],r[3][1],r[3][2],r[3][3],
+                    r[4][0],r[4][1],r[4][2],r[4][3],r[5][0],r[5][1],r[5][2],r[5][3],
+                    r[6][0],r[6][1],r[6][2],r[6][3]);
+      }
     }
   }
   // The VS bank is fixed for the whole post-draw path: classify it once.
@@ -9355,8 +9409,9 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
       // draw; no other character tf6 is bound that way). Perspective banks
       // only (the caster passes bind no PS textures of their own).
       const uint32_t t6w0 = REX_LOAD_U32(device + 0x480 + 6 * 24);
-      if (((t6w0 >> 10) & 0x3Fu) == 0x36u && !bank_ortho &&
-          g_frame_skin_graphic.size() < 1024) {
+      if ((((t6w0 >> 10) & 0x3Fu) == 0x36u ||
+           (BoundCharShaderFlags(base) & kCsStampSkinSkatepark) != 0) &&
+          !bank_ortho && g_frame_skin_graphic.size() < 1024) {
         SkinGraphic& sg = g_frame_skin_graphic[key];
         for (int k = 0; k < 2; ++k) {
           for (int a = 0; a < 3; ++a) {
@@ -9368,9 +9423,48 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
           sg.tf6[k] = REX_LOAD_U32(device + 0x480 + 6 * 24 + uint32_t(k) * 4);
         }
       }
+      // cacstamp_shift samples the selected board graphic from tf5. Capture
+      // that draw-time binding and the c190/c191 placement rows used by VS.
+      if ((BoundCharShaderFlags(base) & kCsStampShift) != 0 && !bank_ortho &&
+          g_frame_shift_graphic.size() < 1024) {
+        ShiftGraphic& sg = g_frame_shift_graphic[key];
+        for (int k = 0; k < 2; ++k) {
+          for (int a = 0; a < 3; ++a) {
+            sg.cg[k * 3 + a] =
+                LoadGuestF32(base, bank + ((190u + uint32_t(k)) * 4 + uint32_t(a)) * 4);
+          }
+        }
+        for (int k = 0; k < 6; ++k) {
+          sg.tf5[k] = REX_LOAD_U32(device + 0x480 + 5 * 24 + uint32_t(k) * 4);
+        }
+      }
       // Face injury layer (see g_frame_face_injury): the face's main-pass
       // compiles bind the skater's injury map at tf6 and scale it by c22.z.
       const uint32_t csf = BoundCharShaderFlags(base);
+      if ((csf & (kCsStampClothDefault | kCsStampClothRopa | kCsStampClothNis |
+                  kCsStampClothRopaNis | kCsStampClothSkatepark |
+                  kCsStampClothRopaSkatepark)) != 0 &&
+          !bank_ortho && g_frame_cloth_stamp_graphic.size() < 1024) {
+        ClothStampGraphic& cg = g_frame_cloth_stamp_graphic[key];
+        // The ROPA CAC-stamp VS has a different placement transform from
+        // the ordinary CAC-stamp VS: its disassembly reads c195/c196, while
+        // the non-ROPA variant reads c190/c191. Use the bound VS layout's
+        // declared CG row so the shirt artwork uses the coordinates actually
+        // emitted by that shader.
+        const VsLayout* cg_layout = BoundVsLayout(base);
+        const uint32_t cg_row = cg_layout != nullptr && cg_layout->cg >= 0
+                                    ? uint32_t(cg_layout->cg)
+                                    : 190u;
+        for (int k = 0; k < 2; ++k) {
+          for (int a = 0; a < 3; ++a) {
+            cg.cg[k * 3 + a] =
+                LoadGuestF32(base, bank + ((cg_row + uint32_t(k)) * 4 + uint32_t(a)) * 4);
+          }
+        }
+        for (int k = 0; k < 6; ++k) {
+          cg.tf5[k] = REX_LOAD_U32(device + 0x480 + 5 * 24 + uint32_t(k) * 4);
+        }
+      }
       // Retail's _nis compiles (front-end / replay editor) insert
       // g_CSMSelfBiasNIS at c9, so every row from g_vLightDir up sits ONE
       // higher than in the default compile (ctab_diff: cac_face_nisPS
@@ -9378,8 +9472,10 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
       // for cac_cloth*_nis / cacstamp_skin_nis). The dev _nis compiles have
       // no such row, which is what these fixed row numbers were read from.
       const uint32_t nis_shift =
-          (csf & (kCsFaceNis | kCsClothNis | kCsClothRopaNis | kCsStampSkinNis)) != 0 ? 1u
-                                                                                    : 0u;
+          (csf & (kCsFaceNis | kCsClothNis | kCsClothRopaNis | kCsStampSkinNis |
+                  kCsStampClothNis | kCsStampClothRopaNis)) != 0
+              ? 1u
+              : 0u;
       if (!bank_ortho && g_frame_face_injury.size() < 256 &&
           (csf & (kCsFaceDefault | kCsFaceNis)) != 0) {
         const uint32_t fpsb = g_ps_bank.load(std::memory_order_relaxed);
@@ -9399,13 +9495,17 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
         // the STAMP at tf5 (second texcoord) and the dirt map at tf6 (10/
         // 28-33, the same lerp x c22.y as cac_cloth).
         const bool stamp_cloth =
-            !cloth && (csf & (kCsStampClothDefault | kCsStampClothRopa)) != 0;
+            !cloth && (csf & (kCsStampClothDefault | kCsStampClothRopa |
+                              kCsStampClothNis | kCsStampClothRopaNis |
+                              kCsStampClothSkatepark |
+                              kCsStampClothRopaSkatepark)) != 0;
         const bool skin = !cloth && !stamp_cloth &&
                           (csf & (kCsStampSkinDefault | kCsStampSkinNis)) != 0;
         const uint32_t lpsb = g_ps_bank.load(std::memory_order_relaxed);
         if ((cloth || stamp_cloth || skin) && lpsb != 0) {
           CharLayer& cl = g_frame_char_layer[key];
           const uint32_t slot = cloth ? 5u : stamp_cloth ? 6u : 7u;
+          cl.slot = slot;
           for (int k = 0; k < 6; ++k) {
             cl.words[k] = REX_LOAD_U32(device + 0x480 + slot * 24 + uint32_t(k) * 4);
           }
@@ -13056,6 +13156,8 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
   FlatSet<uint32_t> ortho_ctx;
   std::unordered_multimap<uint32_t, float> ortho_mag;
   std::unordered_map<uint64_t, SkinGraphic> skin_graphic;
+  std::unordered_map<uint64_t, ShiftGraphic> shift_graphic;
+  std::unordered_map<uint64_t, ClothStampGraphic> cloth_stamp_graphic;
   std::unordered_map<uint64_t, FaceInjury> face_injury;
   std::unordered_map<uint64_t, CharLayer> char_layer;
   std::unordered_map<uint64_t, SkinSssRecord> skin_sss;
@@ -13088,6 +13190,8 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
     ortho_ctx.swap(g_frame_ortho_ctx);
     ortho_mag.swap(g_frame_ortho_mag);
     skin_graphic.swap(g_frame_skin_graphic);
+    shift_graphic.swap(g_frame_shift_graphic);
+    cloth_stamp_graphic.swap(g_frame_cloth_stamp_graphic);
     face_injury.swap(g_frame_face_injury);
     char_layer.swap(g_frame_char_layer);
     skin_sss.swap(g_frame_skin_sss);
@@ -13614,6 +13718,57 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
         }
       }
     }
+    // Board custom graphics use the draw-time tf5 binding and c190/c191
+    // placement. Keep the latest capture across frames where the hook misses.
+    {
+      static std::unordered_map<uint64_t, std::pair<ShiftGraphic, uint64_t>> s_shift_graphic;
+      static uint64_t s_shift_frame = 0;
+      ++s_shift_frame;
+      if (s_shift_graphic.size() > 1024) {
+        s_shift_graphic.clear();
+      }
+      for (const auto& [k, sg] : shift_graphic) {
+        s_shift_graphic[k] = {sg, s_shift_frame};
+      }
+      for (DrawItem& item : scene.items) {
+        if (!item.char_shift) {
+          continue;
+        }
+        const auto it = s_shift_graphic.find((uint64_t(item.ib_obj) << 32) | item.vb_obj);
+        if (it != s_shift_graphic.end() && s_shift_frame - it->second.second <= 60) {
+          std::memcpy(item.char_cg, it->second.first.cg, sizeof(item.char_cg));
+          std::memcpy(item.char_cg_fetch, it->second.first.tf5, sizeof(item.char_cg_fetch));
+          item.char_cg_valid = true;
+        }
+      }
+    }
+    // Printed shirt logos are cacstamp_cloth tf5 artwork, separate from the
+    // tf6 cloth dirt map. Retain the latest placement/binding across a frame
+    // where the indexed-draw capture misses.
+    {
+      static std::unordered_map<uint64_t, std::pair<ClothStampGraphic, uint64_t>>
+          s_cloth_stamp_graphic;
+      static uint64_t s_cloth_stamp_frame = 0;
+      ++s_cloth_stamp_frame;
+      if (s_cloth_stamp_graphic.size() > 1024) {
+        s_cloth_stamp_graphic.clear();
+      }
+      for (const auto& [k, cg] : cloth_stamp_graphic) {
+        s_cloth_stamp_graphic[k] = {cg, s_cloth_stamp_frame};
+      }
+      for (DrawItem& item : scene.items) {
+        if (!item.char_cloth_stamp) {
+          continue;
+        }
+        const auto it = s_cloth_stamp_graphic.find((uint64_t(item.ib_obj) << 32) | item.vb_obj);
+        if (it != s_cloth_stamp_graphic.end() &&
+            s_cloth_stamp_frame - it->second.second <= 60) {
+          std::memcpy(item.char_cg, it->second.first.cg, sizeof(item.char_cg));
+          std::memcpy(item.char_cg_fetch, it->second.first.tf5, sizeof(item.char_cg_fetch));
+          item.char_cg_valid = true;
+        }
+      }
+    }
     // CAC cloth dirt / skin injury layer (see g_frame_char_layer), held
     // like the skin graphic.
     {
@@ -13636,6 +13791,7 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
           if (cl.words[1] != 0 && cl.amount > 0.0f && cl.amount <= 4.0f) {
             std::memcpy(item.char_layer_fetch, cl.words, sizeof(item.char_layer_fetch));
             item.char_layer_amount = cl.amount;
+            item.char_layer_slot = cl.slot;
             item.char_layer_valid = true;
           }
         }
@@ -15720,8 +15876,7 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
   {
     std::lock_guard<std::mutex> lock(g_tree_anim_mutex);
     if (g_tree_anim_have) {
-      std::memcpy(scene.tree_anim_rows, g_tree_anim_rows,
-                  sizeof(scene.tree_anim_rows));
+      std::memcpy(scene.tree_anim_rows, g_tree_anim_rows, sizeof(g_tree_anim_rows));
       scene.tree_anim_valid = true;
     }
   }

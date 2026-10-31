@@ -1174,6 +1174,29 @@ std::string SelectedGamertag(const std::filesystem::path& store_path) {
   return p ? p->gamertag : std::string();
 }
 
+bool LiveSignIn(const std::filesystem::path& store_path) {
+  Store store = Load(store_path);
+  const Profile* p = SignedIn(store);
+  return p != nullptr && p->signed_in && p->live_signed_in;
+}
+
+void SetLiveSignIn(const std::filesystem::path& store_path, bool enabled) {
+  const auto update = [&] {
+    Store store = Load(store_path);
+    Profile* p = SignedIn(store);
+    if (p == nullptr) {
+      return;
+    }
+    p->live_signed_in = enabled;
+    Save(store_path, store);
+  };
+  if (splitscreen::Session* session = splitscreen::Session::Get()) {
+    session->WithLock(update);
+  } else {
+    update();
+  }
+}
+
 bool RenameSelected(const std::filesystem::path& store_path, const std::string& gamertag) {
   const std::string name = SanitizeGamertag(gamertag);
   bool ok = false;

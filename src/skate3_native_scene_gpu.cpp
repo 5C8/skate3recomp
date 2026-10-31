@@ -1088,7 +1088,12 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
     // whose VS passes the lightmap UV raw (Out.UV.zw = In.LM, no abs),
     // and CAS skin, whose VS feeds the raw texcoord (w = 1) to the
     // custom-graphic rows (see DrawItem::char_skin).
-    if (item.char_family < 4 && item.water_ocean == 0 && !item.char_skin) {
+    // cacstamp_* VSes apply c190/c191 directly to the raw second UV (the
+    // retail ucode has no abs/mirror operation before those dot products).
+    // Keep it signed for skin, deck-shift, and stamped-cloth graphics; the
+    // generic character/environment lightmap path still uses |uv2|.
+    if (item.char_family < 4 && item.water_ocean == 0 && !item.char_skin &&
+        !item.char_shift && !item.char_cloth_stamp) {
       dst[v * 14 + 5] = std::fabs(dst[v * 14 + 5]);
       dst[v * 14 + 6] = std::fabs(dst[v * 14 + 6]);
     }
@@ -1173,18 +1178,20 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
       dst[v * 14 + 12] = dst[v * 14 + 3];
       dst[v * 14 + 13] = dst[v * 14 + 4];
     }
-    if (traffic) {
-      decode_uv(lit_fmt, lit_off, dst[v * 14 + 3], dst[v * 14 + 4]);
-      decode_uv(unlit_fmt, unlit_off, dst[v * 14 + 12], dst[v * 14 + 13]);
-    }
-    // treeanimate_defaultVS reads UV1.zw as its authored wind seed. Keep
-    // those signed-normalized components in TEXCOORD2 for the VS port.
+    // treeanimate_defaultVS fetches a full TEXCOORD1 and uses its zw as the
+    // per-vertex wind seed (r3.zw in the captured ucode). These animated.tree
+    // declarations use signed 16-bit four-component UV1 at item.uv2_offset;
+    // preserve zw in the otherwise-unused uv3 slot for vs_main.
     if (item.env_family == 10 && item.uv2_fmt == 26) {
       const uint8_t* q = src_vb + size_t(v) * item.stride + item.uv2_offset + 4;
       dst[v * 14 + 12] = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q))) /
                          32767.0f;
       dst[v * 14 + 13] = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2))) /
                          32767.0f;
+    }
+    if (traffic) {
+      decode_uv(lit_fmt, lit_off, dst[v * 14 + 3], dst[v * 14 + 4]);
+      decode_uv(unlit_fmt, unlit_off, dst[v * 14 + 12], dst[v * 14 + 13]);
     }
     // Vertex normal: k_10_11_11 packed (x 11 bits, y 11 bits, z 10 bits,
     // LSB to MSB, signed). Zero when absent -> derivative face-normal
@@ -6473,7 +6480,7 @@ void WarmItemResources(const NativeGuestOutputRenderContext& context, uint8_t* b
     warm_texture(item.decal_art);
     warm_fetch_words(item.decal_fetch);
   }
-  if (item.char_skin) {
+  if (item.char_skin || item.char_shift || item.char_cloth_stamp) {
     warm_fetch_words(item.char_cg_fetch);
   }
   if (item.sss) {
@@ -12668,10 +12675,6 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cb[39] = scene.family_rows[3];  // proxyworld scale (proxy PS c3.y)
       std::memcpy(cb + 40, scene.fog_color, 4 * sizeof(float));
     }
-    if (scene.tree_anim_valid) {
-      std::memcpy(cb + 1088, scene.tree_anim_rows,
-                  sizeof(scene.tree_anim_rows));
-    }
     // World-shading v2 row (sh_v2, cb[60..63]): x = stored-tangent
     // polarity, yzw = the build-up showcase split state (stage left/right
     // of the split + its position in output pixels; zeros = showcase off).
@@ -12785,6 +12788,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         g_r.deck_decal_valid = true;
       }
     }
+    if (scene.tree_anim_valid) {
+      std::memcpy(cb + 1088, scene.tree_anim_rows, sizeof(scene.tree_anim_rows));
+    }
+    static_assert(RendererState::kShadowCbSlice >= 1104 * sizeof(float));
     static_assert(RendererState::kShadowCbSlice >= (976 + skate3::deck_shadow::kMaxSkaters * 16) * sizeof(float));
     for (uint32_t index = 0; index < skate3::deck_shadow::kMaxSkaters; ++index) {
       const auto& deck = scene.decks[index];
@@ -13948,6 +13955,60 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         skin_decal = nullptr;
       }
     }
+    const GuestTexture* shift_graphic_tex = nullptr;
+    if (item.char_shift && item.char_cg_valid && item.char_rows[14 * 4 + 1] > 0.0f &&
+        debug_mode == 0 && REXCVAR_GET(skate3_native_render_scene_decals)) {
+      shift_graphic_tex = resolve_fetch_words(
+          item.char_cg_fetch, (uint64_t(item.mesh) << 1) ^ (5ull << 60), item.retained);
+      if (shift_graphic_tex != nullptr &&
+          (!shift_graphic_tex->valid || shift_graphic_tex->srv == nullptr)) {
+        shift_graphic_tex = nullptr;
+      }
+    }
+    const GuestTexture* cloth_stamp_tex = nullptr;
+    if (item.char_cloth_stamp && item.char_cg_valid &&
+        item.char_rows[14 * 4 + 1] > 0.0f && debug_mode == 0 &&
+        REXCVAR_GET(skate3_native_render_scene_decals)) {
+      cloth_stamp_tex = resolve_fetch_words(
+          item.char_cg_fetch,
+          (uint64_t(item.mesh) << 1) ^ (5ull << 60) ^ (1ull << 59), item.retained);
+      if (cloth_stamp_tex != nullptr &&
+          (!cloth_stamp_tex->valid || cloth_stamp_tex->srv == nullptr)) {
+        cloth_stamp_tex = nullptr;
+      }
+    }
+    // Temporary, state-change-only trace for the CAC custom-art path. This
+    // distinguishes a missing shader capture, missing draw-item association,
+    // or failed texture decode without logging every character draw.
+    if (item.char_skin || item.char_shift || item.char_cloth_stamp) {
+      const uint32_t kind = item.char_skin ? 1u : item.char_shift ? 2u : 3u;
+      const GuestTexture* art = item.char_skin ? skin_decal
+                                : item.char_shift ? shift_graphic_tex
+                                                  : cloth_stamp_tex;
+      const bool rows_ok = item.char_rows[14 * 4 + 1] > 0.0f;
+      uint64_t signature = FetchWordsKey(item.char_cg_fetch);
+      signature ^= uint64_t(item.char_cg_valid) << 1;
+      signature ^= uint64_t(item.retained) << 2;
+      signature ^= uint64_t(rows_ok) << 3;
+      signature ^= uint64_t(art != nullptr && art->valid && art->srv != nullptr) << 4;
+      const uint64_t probe_key = (uint64_t(item.mesh) << 2) | kind;
+      static std::unordered_map<uint64_t, uint64_t> s_art_probe;
+      if (s_art_probe.size() > 2048) s_art_probe.clear();
+      const auto prior = s_art_probe.find(probe_key);
+      if (prior == s_art_probe.end() || prior->second != signature) {
+        s_art_probe[probe_key] = signature;
+        REXLOG_INFO(
+            "native-scene: stamp route kind={} mesh={:08X} ib={:08X} vb={:08X} "
+            "cg={} retained={} rows={} fetch=[{:08X} {:08X} {:08X}] "
+            "uv=({:.5f},{:.5f},{:.5f};{:.5f},{:.5f},{:.5f}) tex={} srv={}",
+            kind, item.mesh, item.ib_obj, item.vb_obj, item.char_cg_valid,
+            item.retained, rows_ok, item.char_cg_fetch[0], item.char_cg_fetch[1],
+            item.char_cg_fetch[2], item.char_cg[0], item.char_cg[1],
+            item.char_cg[2], item.char_cg[3], item.char_cg[4], item.char_cg[5],
+            art != nullptr && art->valid,
+            art != nullptr && art->srv != nullptr);
+      }
+    }
     // Face injury layer (see DrawItem::face_inj_*): the skater's bruise /
     // scrape map (the face PS's tf6), bound in the t1 slot the face never
     // uses (it carries no custom graphic); overlay.x = 2 tells the branch.
@@ -13965,8 +14026,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // the free t5 pair slot, strength in ch_tintB.y (0 = none).
     const GuestTexture* skin_inj = nullptr;
     if (item.char_skin && item.char_layer_valid && debug_mode == 0) {
-      skin_inj = resolve_fetch_words(item.char_layer_fetch,
-                                     (uint64_t(item.mesh) << 1) ^ (7ull << 60), item.retained);
+      skin_inj = resolve_fetch_words(
+          item.char_layer_fetch,
+          (uint64_t(item.mesh) << 1) ^ (uint64_t(item.char_layer_slot) << 60), item.retained);
       if (skin_inj != nullptr && !skin_inj->valid) {
         skin_inj = nullptr;
       }
@@ -14384,8 +14446,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         !item.char_skin) {
       const GuestTexture* dirt = nullptr;
       if (item.char_layer_valid) {
-        dirt = resolve_fetch_words(item.char_layer_fetch,
-                                   (uint64_t(item.mesh) << 1) ^ (5ull << 60), item.retained);
+        dirt = resolve_fetch_words(
+            item.char_layer_fetch,
+            (uint64_t(item.mesh) << 1) ^ (uint64_t(item.char_layer_slot) << 60),
+            item.retained);
         if (dirt != nullptr && !dirt->valid) {
           dirt = nullptr;
         }
@@ -14900,6 +14964,19 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       constants[50] = item.char_cg[4];
       constants[51] = item.char_cg[5];
     }
+    if (shift_graphic_tex != nullptr || cloth_stamp_tex != nullptr) {
+      constants[40] = item.char_cg[0];
+      constants[41] = item.char_cg[1];
+      constants[42] = item.char_cg[2];
+      constants[43] = item.char_cg[3];
+      constants[50] = item.char_cg[4];
+      constants[51] = item.char_cg[5];
+      if (shift_graphic_tex != nullptr) {
+        constants[47] = 7.0f;  // overlay.w selects the CAC shift graphic.
+      } else {
+        constants[48] = 1.0f;  // misc.x selects the cacstamp_cloth graphic.
+      }
+    }
     // cam_pos.w = -40 selects the exact sky branch: the game computes the
     // sun glow inside the dome shader (see the PS sky branch). Needs the
     // frame's captured sky sun rows AND the 1D gradient bound above; falls
@@ -15082,11 +15159,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       t10_want = g_r.world_shadow_srv;
     }
     if (v2_flags != 0 || ocean_n2 || ocean_ov || refract_view != nullptr ||
-        waterdef_n2 != nullptr || decal2_tex != nullptr) {
+        waterdef_n2 != nullptr || decal2_tex != nullptr || shift_graphic_tex != nullptr ||
+        cloth_stamp_tex != nullptr) {
       // Full-table bind: re-pairing only t8/t9 would reset the t10 static
       // sun-shadow map to the backend fallback. The fifth entry (t12) is the
-      // decal2 second art layer; only fam 3 items flagged through misc.y
-      // sample it.
+      // decal2 second art layer or the CAC shift graphic; each branch uses
+      // its own per-draw selector.
       nrhi::TextureView* t8_views[5] = {
           (waterdef_n2 != nullptr
                ? waterdef_n2
@@ -15097,7 +15175,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                : (v2_spec2 != nullptr ? v2_spec2 : &g_r.white))
               ->srv,
           t10_want, deck_view,
-          decal2_tex != nullptr ? decal2_tex->srv : g_r.white.srv};
+          cloth_stamp_tex != nullptr
+              ? cloth_stamp_tex->srv
+              : (shift_graphic_tex != nullptr
+                     ? shift_graphic_tex->srv
+                     : (decal2_tex != nullptr ? decal2_tex->srv : g_r.white.srv))};
       cmd->SetTextures(8, t8_views, 5);
       t10_bound = t10_want;
     }
