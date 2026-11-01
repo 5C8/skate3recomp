@@ -1182,12 +1182,52 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
     // per-vertex wind seed (r3.zw in the captured ucode). These animated.tree
     // declarations use signed 16-bit four-component UV1 at item.uv2_offset;
     // preserve zw in the otherwise-unused uv3 slot for vs_main.
-    if (item.env_family == 10 && item.uv2_fmt == 26) {
-      const uint8_t* q = src_vb + size_t(v) * item.stride + item.uv2_offset + 4;
-      dst[v * 14 + 12] = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q))) /
-                         32767.0f;
-      dst[v * 14 + 13] = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2))) /
-                         32767.0f;
+    // vertexanimate_defaultVS (animated.flag, fam 19) fetches the same
+    // four-component TEXCOORD1 and seeds its wave from zw too (its r0.xw).
+    // The VS reads it by element SHAPE (vf0: position, a 2-component
+    // diffuse UV, the 4-component lightmap-UV + seed element), not by usage
+    // index, so take the 4-component element from whichever texcoord slot
+    // holds it; reading zw past a 2-component element fed neighbouring
+    // bytes in as seeds and flung most of the cloth away.
+    if (item.env_family == 10 || item.env_family == 19) {
+      const auto four = [](uint32_t f) { return f == 26 || f == 32 || f == 38; };
+      const auto seeds_from = [&](uint32_t fmt, uint32_t off) {
+        const uint32_t pair = fmt == 26 ? 25u : fmt == 32 ? 31u : 37u;
+        decode_uv(pair, off + (fmt == 38 ? 8u : 4u), dst[v * 14 + 12], dst[v * 14 + 13]);
+      };
+      if (four(item.uv2_fmt)) {
+        seeds_from(item.uv2_fmt, item.uv2_offset);
+      } else if (item.env_family == 19 && four(item.uv_fmt)) {
+        // Usage indices swapped: TEXCOORD0 is the 4-component element (the
+        // lightmap UV + seeds), the 2-component one is the diffuse UV.
+        seeds_from(item.uv_fmt, item.uv_offset);
+        decode_uv(item.uv_fmt, item.uv_offset, dst[v * 14 + 5], dst[v * 14 + 6]);
+        decode_uv(item.uv2_fmt, item.uv2_offset, dst[v * 14 + 3], dst[v * 14 + 4]);
+      } else if (item.env_family == 19) {
+        // No seed element: neutral seeds (0.5, 0.5) = zero amplitude.
+        dst[v * 14 + 12] = 0.5f;
+        dst[v * 14 + 13] = 0.5f;
+      }
+      if (item.env_family == 19 && v + 1 == num_verts) {
+        // DIAGNOSTIC (animated.flag): the element layout and seed range.
+        static std::mutex s_flag_mutex;
+        static std::unordered_set<uint32_t> s_flag_logged;
+        std::lock_guard<std::mutex> lock(s_flag_mutex);
+        if (s_flag_logged.size() < 16 && s_flag_logged.insert(item.mesh).second) {
+          float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+          for (uint32_t k = 0; k < num_verts; ++k) {
+            for (int c = 0; c < 2; ++c) {
+              lo[c] = std::min(lo[c], dst[k * 14 + 12 + c]);
+              hi[c] = std::max(hi[c], dst[k * 14 + 12 + c]);
+            }
+          }
+          REXLOG_INFO("native-scene: flag mesh={:08X} stride={} pos_fmt={} uv=({},{}) uv2=({},{}) "
+                      "uv3=({},{}) verts={} seed_u=[{:.3g},{:.3g}] seed_v=[{:.3g},{:.3g}]",
+                      item.mesh, item.stride, item.pos_fmt, item.uv_fmt, item.uv_offset,
+                      item.uv2_fmt, item.uv2_offset, item.uv3_fmt, item.uv3_offset, num_verts,
+                      lo[0], hi[0], lo[1], hi[1]);
+        }
+      }
     }
     if (traffic) {
       decode_uv(lit_fmt, lit_off, dst[v * 14 + 3], dst[v * 14 + 4]);
@@ -3729,8 +3769,17 @@ bool EnsureBlurPsos(const NativeGuestOutputRenderContext& context) {
     if (g_r.pso_photo_out) device->DestroyDeferred(g_r.pso_photo_out);
     g_r.pso_photo_out = nullptr;
     if (bphoto != nullptr) {
-      bp.ps = bphoto;
-      g_r.pso_photo_out = device->CreateGraphicsPipeline(bp);
+      // Premultiplied over the photo's clear + backdrop layers (see ps_photo_out).
+      nrhi::GraphicsPipelineDesc pp = bp;
+      pp.ps = bphoto;
+      pp.blend.enable = true;
+      pp.blend.src = nrhi::BlendFactor::kOne;
+      pp.blend.dst = nrhi::BlendFactor::kInvSrcAlpha;
+      pp.blend.op = nrhi::BlendOp::kAdd;
+      pp.blend.src_alpha = nrhi::BlendFactor::kOne;
+      pp.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
+      pp.blend.op_alpha = nrhi::BlendOp::kAdd;
+      g_r.pso_photo_out = device->CreateGraphicsPipeline(pp);
       device->DestroyDeferred(bphoto);
     }
     device->DestroyDeferred(bvs);
@@ -10312,6 +10361,7 @@ namespace {
 // PhotoRender): RenderScene then draws this scene offscreen only.
 bool g_photo_mode = false;
 std::shared_ptr<const FrameScene> g_photo_scene;
+std::shared_ptr<const PhotoLayers> g_photo_layers;  // the job's 2D composition
 
 // One-pass VR stereo lens mask (RenderScene main-pass setup): a depth-only
 // variant of the 2D pipeline drawing each eye's hidden-area mesh at depth 0,
@@ -12380,7 +12430,17 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     clear_color[1] = scene.clear_color[1];
     clear_color[2] = scene.clear_color[2];
   }
-  if (hdr_on) {
+  // Portrait job: the skater renders over transparent black, so the plane's
+  // alpha is its coverage (scene shaders write alpha 1; hair blends it). The
+  // photo tail composites it between the pass's own 2D layers over the
+  // game's raw clear colour, in the 1152x640 target. The packed HDR format
+  // has no alpha: there the skater stays opaque over the clear (no backdrop
+  // layer behind it; the layers drawn after it still apply).
+  const bool photo_coverage =
+      photo_mode && !(hdr_on && g_r.hdr_scene_format == nrhi::Format::kR11G11B10_FLOAT);
+  if (photo_coverage) {
+    clear_color[0] = clear_color[1] = clear_color[2] = clear_color[3] = 0.0f;
+  } else if (hdr_on) {
     // The clear is authored in the final gamma space; the HDR plane holds
     // pre-tonemap values, so encode through the tone chain's inverse (the
     // same transform as scene.hlsl PassGamma) so undecoded holes keep the
@@ -12561,7 +12621,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       std::memcpy(cb+972, skate3::vr::FirstPersonHead(), 3*sizeof(float));
       cb[975]=0.32f;  // local player's head only; body and shadow remain
     }
-    if (shadow_ready) {
+    // Portrait jobs take no sun shadows: the cascades (and the static sun
+    // map) are the editor view's, placed for the on-screen scene, while the
+    // photo stage stands elsewhere; sampled there they laid unrelated hard
+    // shadows across the skater. The game's own pass reads the same atlas
+    // and its stage falls outside it, so its picture comes out unshadowed.
+    if (shadow_ready && !photo_mode) {
       std::memcpy(cb + 0, sh + 0, 4 * sizeof(float));    // sh_x   = PS c0
       std::memcpy(cb + 4, sh + 12, 4 * sizeof(float));   // sh_y   = PS c3
       std::memcpy(cb + 8, sh + 16, 4 * sizeof(float));   // sh_z   = PS c4
@@ -12627,7 +12692,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // min(lm^2, s + sh_color) to pure black - the missing walls/floor.
     // The game itself never sun-shadows static world geometry indoors;
     // standing the map down restores its exact lm^2 shading.
-    if (g_r.static_sun_valid && scene.shadow_fresh) {
+    if (g_r.static_sun_valid && scene.shadow_fresh && !photo_mode) {
       std::memcpy(cb + 144, g_r.nsm_rows, sizeof(g_r.nsm_rows));
       cb[156] = std::clamp(
           float(REXCVAR_GET(skate3_native_render_scene_shadow_static_strength)),
@@ -12791,7 +12856,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     if (scene.tree_anim_valid) {
       std::memcpy(cb + 1088, scene.tree_anim_rows, sizeof(scene.tree_anim_rows));
     }
-    static_assert(RendererState::kShadowCbSlice >= 1104 * sizeof(float));
+    if (scene.flag_anim_valid) {
+      std::memcpy(cb + 1104, scene.flag_anim_rows, sizeof(scene.flag_anim_rows));
+    }
+    static_assert(RendererState::kShadowCbSlice >= 1124 * sizeof(float));
     static_assert(RendererState::kShadowCbSlice >= (976 + skate3::deck_shadow::kMaxSkaters * 16) * sizeof(float));
     for (uint32_t index = 0; index < skate3::deck_shadow::kMaxSkaters; ++index) {
       const auto& deck = scene.decks[index];
@@ -13265,6 +13333,18 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // one-frame malformed garment). Drop it and decode the new piece NOW
     // (a garment decode is sub-millisecond), never a frame late.
     bool layout_changed = false;
+    // Portrait jobs render once and the import-skater screen recycles the
+    // same mesh objects for every skater it photographs: a cached decode of
+    // another payload (fingerprint) is dropped and the piece decoded now,
+    // never deferred to the workers (a deferred piece is simply missing).
+    if (g_photo_mode && it != g_r.meshes.end() && it->second.fingerprint != item.fingerprint) {
+      PoolMeshBuffer(g_r.device, it->second.vb);
+      PoolMeshBuffer(g_r.device, it->second.ib);
+      g_r.meshes.erase(it);
+      it = g_r.meshes.end();
+      g_r.ropa_shapes.erase(item.mesh);
+      layout_changed = true;
+    }
     if (it != g_r.meshes.end() && dynamic_payload && it->second.layout != 0 &&
         ForeignLayout(item.mesh, it->second.layout, MeshLayoutKey(item))) {
       PoolMeshBuffer(g_r.device, it->second.vb);
@@ -13275,7 +13355,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       layout_changed = true;
     }
     if (it == g_r.meshes.end()) {
-      if (!item.cloth_quads && !ropa_inline && !layout_changed) {
+      if (!item.cloth_quads && !ropa_inline && !layout_changed && !g_photo_mode) {
         // ALL mesh misses decode on the workers, including first-sight
         // skinned entities (a streamed-in NPC appears 1-2 frames late
         // instead of hitching the frame; the dyn decode jobs usually land
@@ -13284,7 +13364,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         g_rr_mesh_deferred.fetch_add(1, std::memory_order_relaxed);
         return;
       }
-      if (!layout_changed && mesh_budget > 0 && mesh_decodes >= uint32_t(mesh_budget)) {
+      if (!layout_changed && !g_photo_mode && mesh_budget > 0 &&
+          mesh_decodes >= uint32_t(mesh_budget)) {
         g_rr_mesh_deferred.fetch_add(1, std::memory_order_relaxed);
         return;  // decodes on a later frame
       }
@@ -13364,7 +13445,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           item.env_family != 9 && item.env_family != 10 &&
           item.env_family != 13 &&
           // fam 16 cut-out cards (wheels, fences) are thin two-sided sheets
-          item.env_family != 16;
+          item.env_family != 16 &&
+          // fam 19 flag cloth: one sheet seen from both sides
+          item.env_family != 19;
       // Guest wireframe (debug Render -> Settings -> Wireframe) overrides
       // the cull variants: with line rasterization there are no filled faces
       // to hide. It is a PER-DRAW state, not a global one -- the game keeps
@@ -13378,11 +13461,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // the draw's cull state (the flower bushes: lit and shaded copies of
       // every card, which uncull(ed) z-fight into flicker). Follow the
       // game's recorded per-draw cull register for this family.
+      // Fam 19 (animated.flag) follows the recorded register the same way.
       const int game_cull_mode =
-          (item.env_family == 16 && g_r.pso_cullfront != nullptr)
+          ((item.env_family == 16 || item.env_family == 19) && g_r.pso_cullfront != nullptr)
               ? GameCullMode(scene, item)
               : 0;
-      if (item.env_family == 16) {
+      if (item.env_family == 16 || item.env_family == 19) {
         // First sightings only: which cull state the game records for
         // environment.transparent draws (0x18004 = none, 0x18005/6 = cull).
         static std::atomic<uint32_t> s_te_cull_log{0};
@@ -13397,9 +13481,34 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
               have ? rs_log.mode_cntl : 0u, game_cull_mode);
         }
       }
+      if (item.env_family == 19) {
+        // DIAGNOSTIC (animated.flag cull): the game's recorded state per mesh.
+        static std::unordered_set<uint32_t> s_flag_cull_logged;
+        if (s_flag_cull_logged.size() < 32 && s_flag_cull_logged.insert(item.mesh).second) {
+          DrawRegState rs_log;
+          const bool have = ItemDrawRs(scene, item, rs_log);
+          REXLOG_INFO(
+              "native-scene: flag cull mesh={:08X} rs={} own={} mode_cntl={:08X} "
+              "det3={:.3g} sheet={} -> game_cull={}",
+              item.mesh, have ? 1 : 0, item.game_rs_seen ? 1 : 0, have ? rs_log.mode_cntl : 0u,
+              det3, buffers.two_sided_sheet ? 1 : 0, game_cull_mode);
+        }
+      }
+      // Fam 19 (animated.flag): a RECORDED cull-off register (captured
+      // mode_cntl 0x18004 on every flag draw) is an explicit "draw both
+      // sides"; GameCullMode's 0 also means "unrecorded", which fell through
+      // to the two-sided-sheet rule below and culled the cloth's far side
+      // (the flags drew as slivers next to the pole).
+      bool game_no_cull = false;
+      if (item.env_family == 19 && game_cull_mode == 0) {
+        DrawRegState rs_nc;
+        game_no_cull = ItemDrawRs(scene, item, rs_nc) && rs_nc.mode_cntl != 0 &&
+                       (rs_nc.mode_cntl & 3u) == 0;
+      }
       nrhi::Pipeline* const game_cull =
           game_cull_mode == 1   ? g_r.pso_cullback
           : game_cull_mode == 2 ? g_r.pso_cullfront
+          : game_no_cull        ? g_r.pso
                                 : nullptr;
       nrhi::Pipeline* want =
           forced_pso != nullptr ? forced_pso
@@ -13431,6 +13540,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // Inline character-texture decode gate (menus/editor only, <= 6 per
     // frame; everything else keeps the async worker path).
     const auto char_tex_inline_ok = [&]() -> bool {
+      // Portrait jobs render once: every miss decodes now (an async miss
+      // means the piece is skipped; the import-skater screen's skaters are
+      // all first-sight art, so most of their garments never drew).
+      if (g_photo_mode) {
+        return !item.retained;
+      }
       if (item.char_family == 0 || item.retained ||
           !g_in_menus_frame.load(std::memory_order_relaxed)) {
         return false;
@@ -14191,11 +14306,16 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         // environment.transparent runs its exact branch (fam 16) in the
         // sorted alpha pass once its rows are captured; every other
         // transparent item keeps the legacy transparent shading.
-        (!item.transparent || (item.env_family == 16 && scene.ts_valid)) &&
+        // Fam 18 (transparentincandescent neon) needs no captured rows
+        // beyond the frame's own (exposure / fog), like fam 12.
+        (!item.transparent || (item.env_family == 16 && scene.ts_valid) ||
+         item.env_family == 18) &&
         // Fam 14 needs the frame's scroll rows (time + multiplier); the
         // tone chain would multiply by zero without them; the legacy
         // shading covers the capture-less frames.
         (item.env_family != 14 || scene.scroll_valid) &&
+        // Fam 19 (animated.flag) needs its PS c0.x lightmap scale.
+        (item.env_family != 19 || scene.flag_anim_valid) &&
         // Fam 15 (advertisement) needs its captured floor/multiplier/
         // exposure rows; legacy shading covers capture-less frames.
         (item.env_family != 15 || scene.ad_valid || item.ad_seen)) {
@@ -15023,6 +15143,16 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     if (constants[39] < -16.5f && constants[39] > -17.5f) {
       std::memcpy(constants + 40, item.traffic_c7, 4 * sizeof(float));
       constants[44] = item.traffic_c3y;
+    }
+    // Fams 12 / 18 (base / transparent incandescent): overlay.x = the draw's
+    // PS c3.y (material multiplier), overlay.y = its PS c2.x (the exposure
+    // in its tone curve); 0 = not captured (shader keeps 1 / the frame's
+    // exposure). overlay.zw are not read on this branch except overlay.w by
+    // the alpha-test gate, which stays as staged.
+    if ((constants[39] < -11.5f && constants[39] > -12.5f) ||
+        (constants[39] < -17.5f && constants[39] > -18.5f)) {
+      constants[44] = item.incand_mult;
+      constants[45] = item.incand_expo;
     }
     if (constants[39] < -15.5f && constants[39] > -16.5f) {
       constants[40] = scene.ts_rows[0];
@@ -16120,6 +16250,63 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           item->env_family == 16 && GameBlendMode(scene, *item) == 3) {
         want_t = g_r.pso_transparent_add;
       }
+      // Fam 18 (transparentincandescent neon / signs): the game's own blend
+      // for the draw. Blend off (ONE / ZERO) = an alpha-tested cutout drawn
+      // opaque (the restaurant disc signs); straight alpha by default;
+      // additive variants as recorded.
+      DrawRegState nrs;
+      const bool nrs_ok = item->env_family == 18 && ItemDrawRs(scene, *item, nrs);
+      if (item->env_family == 18) {
+        // DIAGNOSTIC (transparent incandescent signs): the game's own state
+        // for each piece, once per mesh.
+        static std::unordered_set<uint32_t> s_logged;
+        if (s_logged.size() < 64 && s_logged.insert(item->mesh).second) {
+          uint32_t w1 = 0;
+          GuestTryLoadU32(base, item->diffuse_tex + 8 * 4, &w1);
+          REXLOG_INFO(
+              "native-scene: incand.transparent mesh={:08X} rs={} own_rs={} blend={:08X} "
+              "colorctl={:08X} mask={:X} depth={:08X} mode={:08X} cull={} mult={:.3g} "
+              "expo={:.3g} tex_fmt={} draws={}",
+              item->mesh, nrs_ok ? 1 : 0, item->game_rs_seen ? 1 : 0, nrs.blend, nrs.color_ctl,
+              nrs.color_mask, nrs.depth, nrs.mode_cntl, GameCullMode(scene, *item), item->incand_mult, item->incand_expo, w1 & 0x3Fu,
+              item->draws.size());
+        }
+      }
+      if (use_depth && nrs_ok && ((nrs.blend >> 5) & 7u) == 0) {
+        const uint32_t cs = nrs.blend & 0x1Fu;
+        const uint32_t cd = (nrs.blend >> 8) & 0x1Fu;
+        if (cs == 1 && cd == 0 && g_r.pso != nullptr) {
+          want_t = g_r.pso;
+        } else if (cs == 1 && cd == 1 && g_r.pso_transparent_add != nullptr) {
+          want_t = g_r.pso_transparent_add;
+        } else if (cs == 6 && cd == 1 && g_r.pso_particle[0] != nullptr) {
+          want_t = g_r.pso_particle[0];
+        } else if (cs == 1 && cd == 7 && g_r.pso_particle[1] != nullptr) {
+          want_t = g_r.pso_particle[1];
+        }
+        // The game's cull + z-write for the sign (captured: blend straight
+        // alpha, z-write ON). The disc signs are double-sided sheet pairs:
+        // uncull(ed) and without depth, the far face's mirrored lettering
+        // and rim drew through the near one (the white fringe ring).
+        const int cm = GameCullMode(scene, *item);
+        const bool zw = ((nrs.depth >> 2) & 1u) != 0;
+        if (want_t == g_r.pso_transparent) {
+          if (zw && g_r.pso_fade != nullptr) {
+            want_t = (cm != 0 && g_r.pso_fade_cull[cm - 1] != nullptr) ? g_r.pso_fade_cull[cm - 1]
+                                                                         : g_r.pso_fade;
+          } else if (cm == 1 && g_r.pso_hair_b != nullptr) {
+            want_t = g_r.pso_hair_b;
+          } else if (cm == 2 && g_r.pso_hair_a != nullptr) {
+            want_t = g_r.pso_hair_a;
+          }
+        } else if (want_t == g_r.pso) {
+          if (cm == 1 && g_r.pso_cullback != nullptr) {
+            want_t = g_r.pso_cullback;  // kFront
+          } else if (cm == 2 && g_r.pso_cullfront != nullptr) {
+            want_t = g_r.pso_cullfront;  // kBack
+          }
+        }
+      }
       // Straight-alpha environment.transparent draws with a game cull state:
       // pso_hair_b / pso_hair_a ARE the transparent state with kFront / kBack.
       if (use_depth && want_t == g_r.pso_transparent && item->env_family == 16 &&
@@ -16793,15 +16980,86 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                             int32_t(RendererState::kBlurHeight)};
     cmd->SetViewport(out_vp);
     cmd->SetScissor(out_sc);
+    // The game's own pass, in its order and in its 1152x640 target: the colour
+    // clear (the raw 8-bit value; the target gets no post), the PhotoEffects
+    // 2D layers drawn before the skater (the backdrop), the skater, then the
+    // layers drawn after it (colour bars, logos, the rotated gamertag). The
+    // layers carry the game's own ortho constants for this target, so they
+    // land exactly where the game drew them whatever the display's aspect.
+    const PhotoLayers* layers = g_photo_layers.get();
+    if (photo_coverage) {
+      float bg[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      const float* src_bg = layers != nullptr && layers->clear_valid ? layers->clear
+                            : scene.clear_valid                      ? scene.clear_color
+                                                                     : nullptr;
+      if (src_bg != nullptr) {
+        for (int k = 0; k < 3; ++k) {
+          bg[k] = std::clamp(src_bg[k], 0.0f, 1.0f);
+        }
+      }
+      cmd->ClearRenderTarget(g_r.photo_out, bg);
+    }
+    // Photo layers use their own UI-ring slice: half a ring ahead of the
+    // frame the job shares its number with, upper half of that region.
+    const uint32_t photo_ui_region =
+        uint32_t((frame_number + RendererState::kUiRegions / 2) % RendererState::kUiRegions) *
+        RendererState::kUiRegionSize;
+    uint32_t photo_ui_offset = RendererState::kUiRegionSize / 2;
+    uint32_t photo_layers_drawn = 0;
+    const bool layers_ok = layers != nullptr && g_r.pso_2d != nullptr &&
+                           g_r.ui_ring_cpu != nullptr && g_r.ui_ring != nullptr;
+    const auto draw_layer = [&](const Draw2d& d) {
+      const uint32_t bytes = uint32_t(d.verts.size());
+      if (bytes == 0 || d.stride != 28 || (d.color_mask & 0xFu) == 0 ||
+          photo_ui_offset + bytes > RendererState::kUiRegionSize) {
+        return;
+      }
+      const GuestTexture* t =
+          resolve_2d_texture(d.fetch, /*force_inline=*/false, /*video=*/false, d.font_id);
+      if (t == nullptr) {
+        return;  // large-art decode in flight
+      }
+      std::memcpy(g_r.ui_ring_cpu + photo_ui_region + photo_ui_offset, d.verts.data(), bytes);
+      float constants[52] = {};
+      std::memcpy(constants, d.consts, sizeof(d.consts));
+      // Vertex-coloured SimpleDraw layouts take c8 = 1 (see emit_draw).
+      const bool vertex_colored =
+          (d.src_stride == 20 && (d.flags & 0x10u) == 0 && (d.flags & 0x20u) != 0) ||
+          (d.src_stride == 28 && ((d.flags & 0x20u) != 0 || d.flags == 0)) ||
+          (d.src_stride == 32 && (d.flags & 0x20u) != 0);
+      if (vertex_colored) {
+        constants[32] = constants[33] = constants[34] = constants[35] = 1.0f;
+      }
+      const bool ortho = d.consts[12] == 0.0f && d.consts[13] == 0.0f &&
+                         d.consts[14] == 0.0f && d.consts[15] == 1.0f;
+      constants[36] = ortho ? 1.0f : 0.0f;
+      constants[37] = float(std::clamp(REXCVAR_GET(skate3_native_render_scene_2d_sharp), 0.0, 2.0));
+      cmd->SetPipeline(Get2dBlendPso(context, d.blend_control));
+      cmd->SetRootConstants(0, 52, constants, 0);
+      cmd->SetTexture(1, t->srv);
+      cmd->SetVertexBuffer(g_r.ui_ring, photo_ui_region + photo_ui_offset, bytes, d.stride);
+      cmd->SetPrimitiveTopology(d.prim == 5 ? nrhi::PrimitiveTopology::kTriangleStrip
+                                            : nrhi::PrimitiveTopology::kTriangleList);
+      cmd->Draw(d.count, 0);
+      photo_ui_offset += bytes;
+      ++photo_layers_drawn;
+    };
+    if (photo_coverage && layers_ok) {
+      for (const Draw2d& d : layers->pre) {
+        draw_layer(d);
+      }
+    }
     cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
     cmd->SetPipeline(g_r.pso_photo_out);
     // Tap spacing: one output texel's footprint in source texels / 4.
     const float step_x = float(pass_w) / float(RendererState::kBlurWidth) * 0.25f;
     const float step_y = float(pass_h) / float(RendererState::kBlurHeight) * 0.25f;
+    // dir.w: composite by the plane's alpha coverage (premultiplied over the
+    // clear + backdrop); 0 = opaque (no coverage in the packed HDR format).
     const float photo_consts[8] = {step_x / float(context.guest_output_width),
                                    step_y / float(context.guest_output_height),
                                    hdr_on ? 1.0f : 0.0f,
-                                   0.0f,
+                                   photo_coverage ? 1.0f : 0.0f,
                                    float(pass_w) / float(context.guest_output_width),
                                    float(pass_h) / float(context.guest_output_height),
                                    0.0f,
@@ -16809,6 +17067,15 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     cmd->SetRootConstants(0, 8, photo_consts, 0);
     cmd->SetTexture(1, src_srv);
     cmd->Draw(3, 0);
+    if (layers_ok) {
+      for (const Draw2d& d : layers->post) {
+        draw_layer(d);
+      }
+    }
+    REXLOG_INFO("native-scene: photo composite: {} of {} + {} 2D layers drawn ({})",
+                photo_layers_drawn, layers != nullptr ? layers->pre.size() : 0,
+                layers != nullptr ? layers->post.size() : 0,
+                photo_coverage ? "skater by coverage" : "opaque skater, packed HDR");
     cmd->Barrier(g_r.photo_out, nrhi::ResourceState::kRenderTarget,
                  nrhi::ResourceState::kCopySource);
     cmd->Barrier(src_tex, nrhi::ResourceState::kPixelShaderResource, src_rest);
@@ -19065,9 +19332,11 @@ bool PhotoRender(const NativeGuestOutputRenderContext& context, void* /*user_dat
   photo.display_height = g_r.last_display_h;
   g_photo_mode = true;
   g_photo_scene = g_photo_job_cur.scene;
+  g_photo_layers = g_photo_job_cur.layers;
   const bool ok = RenderScene(photo, nullptr);
   g_photo_mode = false;
   g_photo_scene.reset();
+  g_photo_layers.reset();
   if (!ok) {
     REXLOG_WARN("native-scene: photo pass job NOT rendered (scene pass declined)");
   }

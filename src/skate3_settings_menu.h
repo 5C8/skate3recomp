@@ -85,6 +85,11 @@ class SettingsMenu final : public rex::ui::ImGuiDialog {
   void ApplyAndRestart();
 
   void BuildRows(std::vector<RowSpec>& rows, int category);
+  // Text-field editing. Every way out of a field (Enter, Escape, pad B,
+  // clicking or navigating elsewhere, switching tab, closing the menu)
+  // goes through EndTextEdit, which commits what was typed.
+  void BeginTextEdit(const RowSpec& row, int row_index);
+  void EndTextEdit();
   NavIntents GatherInput(ImGuiIO& io);
 
   std::filesystem::path config_path_;
@@ -149,6 +154,16 @@ class SettingsMenu final : public rex::ui::ImGuiDialog {
   int row_index_ = 0;
   bool editing_text_ = false;
   bool text_edit_focus_pending_ = false;
+  // The field being edited. text_edit_value_ is the last text typed: ImGui
+  // reverts the buffer itself when Escape deactivates the field, so the
+  // commit restores this instead of trusting the buffer.
+  int text_edit_category_ = -1;
+  int text_edit_row_ = -1;
+  char* text_edit_buf_ = nullptr;
+  size_t text_edit_buf_size_ = 0;
+  std::string text_edit_value_;
+  std::string text_edit_initial_;  // unchanged text skips the commit
+  std::function<void()> text_edit_commit_;
   bool pad_active_ = false;
   uint16_t prev_pad_buttons_ = 0;
   int held_dir_x_ = 0;

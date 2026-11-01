@@ -208,6 +208,21 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
     const float dz = seed_y * tree_anim[2].w * wave.y;
     mp.xyz += float3(dx, dz, dy);
   }
+  // vertexanimate_defaultVS (animated.flag; ucode lines 7-17): the same
+  // per-vertex seeds as the tree (TEXCOORD1.zw, here in uv3) and the same
+  // c7.x clock, but its phase is (c7.x - seed) * c9.xyz + c10.xyz (the tree
+  // multiplies c10 by the seed instead) and the amplitudes are seed *
+  // (c8.w, c9.w, c10.w). Same literal pool and register permutation as the
+  // tree, so axis k of the native position takes phase/amplitude k.
+  // flag_anim = VS c7..c10, flag_anim[4].w = 1 once captured.
+  if (cam_pos.w < -18.5 && cam_pos.w > -19.5 && flag_anim[4].w > 0.0) {
+    const float3 seed = float3(uv3.x - 0.5, uv3.y - 0.5, uv3.x + uv3.y - 1.0);
+    const float3 noise = (flag_anim[0].x - seed) * flag_anim[2].xyz + flag_anim[3].xyz;
+    const float3 phase = frac(noise * 0.159154943091895 + 0.5) * 6.283185307179586 -
+                         3.141592653589793;
+    const float3 amp = seed * float3(flag_anim[1].w, flag_anim[2].w, flag_anim[3].w);
+    mp.xyz += amp * sin(phase);
+  }
   o.pos = mul(mp, mvp);
   o.rpos = mul(mp, world).xyz - cam_pos.xyz;
   o.uv = uv;
@@ -432,7 +447,7 @@ float3 ShaderDebugColor(VSOut i) {
     if (f > 29.5) return float3(0.0, 0.8, 1.0);                      // 30-33 water: sky blue
     if (f > 20.5) return f < 21.5 ? float3(1.0, 0.4, 0.4)            // 21 dynobj: salmon
                                   : float3(0.6, 0.0, 0.0);           // 22 dynobj alphatest: dark red
-    const float3 kEnv[16] = {
+    const float3 kEnv[19] = {
         float3(0.0, 0.6, 0.0),  // 1 baseenvironment: dark green
         float3(0.6, 0.6, 0.6),  // 2 defaultenvironment: gray
         float3(0.6, 0.3, 0.0),  // 3 decal: brown
@@ -448,8 +463,11 @@ float3 ShaderDebugColor(VSOut i) {
         float3(0.7, 0.9, 1.0),  // 13 reflective trans: pale blue
         float3(1.0, 0.9, 0.6),  // 14 scroll incandescent: cream
         float3(0.5, 0.5, 0.0),  // 15 advertisement: olive
-        float3(0.8, 0.0, 0.3)}; // 16 transparentenvironment: crimson
-    return kEnv[clamp(int(f + 0.5) - 1, 0, 15)];
+        float3(0.8, 0.0, 0.3),  // 16 transparentenvironment: crimson
+        float3(0.3, 0.3, 0.3),  // 17 trafficlight: dark grey
+        float3(1.0, 0.6, 0.0),  // 18 transparent incandescent: amber
+        float3(0.4, 0.0, 0.2)}; // 19 animated flag: plum
+    return kEnv[clamp(int(f + 0.5) - 1, 0, 18)];
   }
   // 0 = legacy fallback shading: black/white diagonal stripes.
   return frac((i.pos.x + i.pos.y) / 16.0) < 0.5 ? float3(0.0, 0.0, 0.0)
@@ -494,6 +512,10 @@ float4 ShadePixel(VSOut i) {
     // art's alpha mask out: clipping by the texture alpha dropped the panel
     // around the arrow (and grew the arrow at distance as the filtered
     // mask spread).
+    // Fam 18 (transparentincandescent) follows the game's own per-draw
+    // alpha-test state like every other family (tint.b < 0 = test off): the
+    // cinema neon blends untested, the restaurant disc signs cut out (their
+    // transparent texels are white, a blended edge drew a white fringe).
     if (cam_pos.w > -12.5 || cam_pos.w < -15.5) {
       float aref = cam_pos.w < -0.5 ? 0.1176 : 0.35;
       clip(misc.x > 0.0 ? albedo.a * albedo.a - 0.0627 : albedo.a - aref);
@@ -592,6 +614,8 @@ float4 ShadePixel(VSOut i) {
       else if (fam < 14.5) fc = float3(0.5, 0.5, 0.5);
       else if (fam < 15.5) fc = float3(0.5, 0.5, 0.0);
       else if (fam < 16.5) fc = float3(0.0, 0.5, 0.5);
+      else if (fam > 17.5 && fam < 18.5) fc = float3(1.0, 0.6, 0.0);  // 18: AMBER
+      else if (fam > 18.5 && fam < 19.5) fc = float3(0.4, 0.0, 0.2);  // 19: PLUM (flag)
       else                 fc = float3(0.2, 0.2, 0.2);
       return float4(fc, 1.0);
     }
@@ -709,9 +733,35 @@ float4 ShadePixel(VSOut i) {
           lin *= sh_env.w;
         }
         out_a = albedo.a;
+      } else if (fam < 11.5) {
+        lin = dlin * sh_fogp.w;
       } else {
-        lin = dlin * (fam < 11.5 ? sh_fogp.w : 1.0);
+        // baseincandescent_defaultPS 3-4: D^2 x c3.y (overlay.x), the tone
+        // curve's exposure is its own c2.x (overlay.y), when captured.
+        lin = dlin * (overlay.x > 0.0 ? overlay.x : 1.0);
+        if (overlay.y > 0.0) {
+          expo = overlay.y;
+        }
       }
+    } else if (fam > 18.5 && fam < 19.5) {
+      // vertexanimate_defaultPS (animated.flag): treeanimate's PS without
+      // the lightmap floor or tint: D^2 x lm^2 x c0.x (lines 5-8), then the
+      // VS fog and the shared exposure/tone tail; oC0.w = D.a (line 18).
+      // c0.x is the flag draw's own (flag_anim[4].x, see FrameScene).
+      float3 lmg = lightmap.SampleLevel(smp_clamp, i.uv2, 0.0).rgb;
+      lin = dlin * (lmg * lmg) * flag_anim[4].x;
+      out_a = albedo.a;
+    } else if (fam > 17.5 && fam < 18.5) {
+      // transparentincandescent_defaultPS (neon signage): ucode-identical to
+      // baseincandescent (fam 12: D^2 x c3.y -> fog -> exposure/tone/sqrt)
+      // except oC0.w = D.a (line 14: max oC0.w, r0.w) where the base shader
+      // writes 1; the game blends it, so the black surround disappears.
+      // Same per-draw c3.y / c2.x as fam 12 (overlay.x / overlay.y).
+      lin = dlin * (overlay.x > 0.0 ? overlay.x : 1.0);
+      if (overlay.y > 0.0) {
+        expo = overlay.y;
+      }
+      out_a = albedo.a;
     } else if (fam > 13.5 && fam < 14.5) {
       // scrollincandescent (the stadium LED chyron band): emissive scrolled
       // diffuse. The game's VS adds g_fAnimationTime * (uSpeed, vSpeed) to

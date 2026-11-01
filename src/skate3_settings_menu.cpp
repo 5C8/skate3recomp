@@ -912,8 +912,8 @@ struct SettingsMenu::RowSpec {
   // kText
   char* text_buf = nullptr;
   size_t text_buf_size = 0;
-  // Fired when an edit is confirmed (Enter / focus leaves the field);
-  // Escape cancels and restores the saved value instead.
+  // Fired whenever an edit ends (Enter, Escape / pad B, focus or tab moving
+  // elsewhere, the menu closing), with the typed text in text_buf.
   std::function<void()> on_text_commit;
   // Shown in gray while the field is empty (an unset value).
   std::string placeholder;
@@ -964,6 +964,7 @@ void SettingsMenu::Show() {
   content_scroll_ = 0.0f;
   content_scroll_anim_ = 0.0f;
   editing_text_ = false;
+  text_edit_commit_ = nullptr;
   highlight_anim_y_ = -1.0f;
   rail_anim_y_ = -1.0f;
   prev_pad_buttons_ = 0xFFFF;  // swallow buttons already held at open
@@ -1088,7 +1089,7 @@ void SettingsMenu::Hide() {
     return;
   }
   visible_ = false;
-  editing_text_ = false;
+  EndTextEdit();
   SetDrawActive(false);
   // Slider drags write their cvar per step; persist once on close.
   SaveConfig();
@@ -1102,9 +1103,9 @@ void SettingsMenu::NavigateBack() {
     return;
   }
   if (editing_text_) {
-    // Cancel: drop the uncommitted text, back to the saved values.
-    editing_text_ = false;
-    LoadSettingsFromCvars();
+    // Leaving the field keeps what was typed; cancelling here used to drop
+    // the address of anyone who pressed Escape to get out of the menu.
+    EndTextEdit();
     return;
   }
   if (zone_ == FocusZone::kContent) {
@@ -1112,6 +1113,38 @@ void SettingsMenu::NavigateBack() {
     return;
   }
   Hide();
+}
+
+void SettingsMenu::BeginTextEdit(const RowSpec& row, int row_index) {
+  EndTextEdit();  // a field already open commits before the next one starts
+  zone_ = FocusZone::kContent;
+  row_index_ = row_index;
+  editing_text_ = true;
+  text_edit_focus_pending_ = true;
+  text_edit_category_ = category_;
+  text_edit_row_ = row_index;
+  text_edit_buf_ = row.text_buf;
+  text_edit_buf_size_ = row.text_buf_size;
+  text_edit_value_ = row.text_buf ? row.text_buf : "";
+  text_edit_initial_ = text_edit_value_;
+  text_edit_commit_ = row.on_text_commit;
+}
+
+void SettingsMenu::EndTextEdit() {
+  if (!editing_text_) {
+    return;
+  }
+  editing_text_ = false;
+  text_edit_focus_pending_ = false;
+  if (text_edit_buf_ != nullptr) {
+    CopyToBuffer(text_edit_buf_, text_edit_buf_size_, text_edit_value_);
+  }
+  std::function<void()> commit = std::move(text_edit_commit_);
+  text_edit_commit_ = nullptr;
+  text_edit_buf_ = nullptr;
+  if (commit && text_edit_value_ != text_edit_initial_) {
+    commit();
+  }
 }
 
 void SettingsMenu::ApplyAndRestart() {
@@ -1753,8 +1786,9 @@ void SettingsMenu::BuildRows(std::vector<RowSpec>& rows, int category) {
         row.kind = RowSpec::kText;
         row.label = "Server Address";
         row.desc =
-            "IP address or host name of the custom Skate 3 server. Select to edit, "
-            "Enter to save; leave empty to use the game's original servers. "
+            "IP address or host name of the custom Skate 3 server. Select to edit; "
+            "saves on Enter or when you leave the field. Leave empty to use the "
+            "game's original servers. "
             "Applies to the next connection.";
         row.desc_extra = "Points ";
         for (size_t i = 0; i < g_server_hosts.size(); ++i) {
@@ -1778,7 +1812,7 @@ void SettingsMenu::BuildRows(std::vector<RowSpec>& rows, int category) {
         row.label = "Username";
         row.desc =
             "The gamertag of the signed-in profile: the name the server logs you in "
-            "as and other players see. Select to edit, Enter to save (up to 15 "
+            "as and other players see. Select to edit; saves on Enter or leaving (up to 15 "
             "letters, numbers or spaces). Saves stay with the profile.";
         row.desc_extra =
             "Applies to the next connection to the server. Profiles are created, "
@@ -2197,9 +2231,9 @@ void SettingsMenu::OnDraw(ImGuiIO& io) {
   // ---- Input ----
   NavIntents in = GatherInput(io);
   if (editing_text_) {
-    // The text field owns navigation; pad B cancels the edit.
+    // The text field owns navigation; pad B leaves it, keeping the text.
     if (in.back) {
-      editing_text_ = false;
+      EndTextEdit();
     }
     in = NavIntents{};
   }
@@ -2307,8 +2341,7 @@ void SettingsMenu::OnDraw(ImGuiIO& io) {
         }
         break;
       case RowSpec::kText:
-        editing_text_ = true;
-        text_edit_focus_pending_ = true;
+        BeginTextEdit(row, row_index_);
         break;
       default:
         break;
@@ -2691,7 +2724,9 @@ void SettingsMenu::OnDraw(ImGuiIO& io) {
       continue;
     }
     bool hovered = mouse_in(content_x, y0, content_x + content_w, y1);
-    if (hovered && mouse_moved && row.enabled) {
+    // While a field is being typed into, the cursor drifting over another
+    // row must not move focus: that silently abandoned the edit.
+    if (hovered && mouse_moved && row.enabled && !editing_text_) {
       zone_ = FocusZone::kContent;
       row_index_ = i;
     }
@@ -2904,12 +2939,14 @@ void SettingsMenu::OnDraw(ImGuiIO& io) {
           bool committed = ImGui::InputTextWithHint(
               "##settings_text_edit", row.placeholder.c_str(), row.text_buf,
               row.text_buf_size, ImGuiInputTextFlags_EnterReturnsTrue);
+          // Track what was typed. Escape makes ImGui revert the buffer as it
+          // deactivates the field, so that frame's buffer is not the text.
+          if (row.text_buf != nullptr && !ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            text_edit_value_ = row.text_buf;
+          }
           if (committed || (!ImGui::IsItemActive() && !text_edit_focus_pending_ &&
                             ImGui::IsItemDeactivated())) {
-            editing_text_ = false;
-            if (row.on_text_commit) {
-              row.on_text_commit();
-            }
+            EndTextEdit();
           }
           ImGui::PopStyleColor(2);
           ImGui::PopFont();
@@ -2931,10 +2968,7 @@ void SettingsMenu::OnDraw(ImGuiIO& io) {
                         text);
           }
           if (clicked && hovered && row.enabled) {
-            zone_ = FocusZone::kContent;
-            row_index_ = i;
-            editing_text_ = true;
-            text_edit_focus_pending_ = true;
+            BeginTextEdit(row, i);
           }
         }
         break;
@@ -2958,6 +2992,13 @@ void SettingsMenu::OnDraw(ImGuiIO& io) {
   // ...phase 3: the focused row's own content above the highlight.
   if (content_focus && row_index_ >= 0 && row_index_ < static_cast<int>(rows.size())) {
     draw_row_content(row_index_);
+  }
+  // Focus left the field being edited (a click on another row, the rail or
+  // another tab): its edit box is no longer drawn, so it can never report
+  // deactivation. Commit here instead of leaving the typed text unsaved.
+  if (editing_text_ && (zone_ != FocusZone::kContent || category_ != text_edit_category_ ||
+                        row_index_ != text_edit_row_)) {
+    EndTextEdit();
   }
   dl->PopClipRect();
 

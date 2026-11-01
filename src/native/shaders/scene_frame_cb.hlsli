@@ -194,4 +194,7 @@ cbuffer S : register(b1) {
   float4 deck_rows[28]; // 976..1087
   // treeanimate_defaultVS c7..c10: dynamic time and per-material sway rows.
   float4 tree_anim[4];  // 1088..1103
+  // vertexanimate_defaultVS c7..c10 (animated.flag wave), then the flag
+  // PS's c0 in [4] with w = 1 once captured.
+  float4 flag_anim[5];  // 1104..1123
 };

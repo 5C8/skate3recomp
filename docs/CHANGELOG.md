@@ -1,5 +1,29 @@
 # Release notes
 
+## 1.0.6
+
+- **Create-a-skater pictures:** the custom renderer now draws the skater
+  pictures the game takes when you leave Edit a Skater. It follows the game's
+  `PhotoEffects` pipeline: the 2D layers in front of and behind the skater
+  (backdrop, team-profile frame, bars, logo and rotated gamertag), the pose the
+  game sets for the picture, the picture's own lighting without world sun
+  shadows, and the game's crop at any window aspect ratio.
+- **Import Skater pictures:** skater pieces in the import screen's pictures
+  are decoded before the picture is drawn, instead of streaming in over later
+  frames and leaving only the background.
+- **Neon and incandescent signs:** the game's `transparentincandescent`
+  material (cinema neon, film-reel strip, marquee lettering, restaurant disc
+  signs) now has its own shading path, ported from the game's shader. It uses
+  each draw's live multiplier and exposure, keeps the sign's alpha, and follows
+  the game's blend, culling and depth-write state per draw, so double-sided
+  signs no longer show their mirrored back face through the front.
+- **Waving flags:** `animated.flag` cloth now uses a port of the game's
+  `vertexanimate_defaultVS/PS`. It uses the same per-vertex wind seeds and
+  animation clock as the trees with the flag's own wave constants, draws both
+  sides as the game does, and shows in the family colour key.
+- **Settings text fields:** edits in text fields such as Server Address are
+  now saved however you leave the field. Previously some ways of leaving it
+  dropped the change.
 ## 1.0.5
 
 - **Board stickers:** draw deck stickers in the custom renderer. The game

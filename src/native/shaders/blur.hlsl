@@ -77,17 +77,26 @@ float3 PhotoDecode(float3 v) {
   }
   return saturate(v * 1.41);
 }
+// dir.w = 1: the photo plane was cleared to transparent black, so its alpha
+// is the skater's coverage; the output is premultiplied (blend ONE,
+// INV_SRC_ALPHA) over the pass's clear + backdrop layers. Each tap is
+// un-premultiplied before the decode (it is not linear) and re-weighted.
+// dir.w = 0: opaque, as before (the packed HDR format has no alpha).
 float4 ps_photo_out(VSOut i) : SV_Target {
   float4 rect = tint;
   float2 uv = i.uv * rect.xy + rect.zw;
   float3 c = 0.0;
+  float a = 0.0;
   [unroll] for (int y = 0; y < 4; ++y) {
     [unroll] for (int x = 0; x < 4; ++x) {
       float2 off = float2(float(x) - 1.5, float(y) - 1.5) * dir.xy;
-      c += PhotoDecode(src.SampleLevel(smp_clamp, uv + off, 0).rgb);
+      float4 s = src.SampleLevel(smp_clamp, uv + off, 0);
+      float w = dir.w > 0.5 ? saturate(s.a) : 1.0;
+      c += PhotoDecode(s.rgb / max(w, 1e-4)) * w;
+      a += w;
     }
   }
-  return float4(c / 16.0, 1.0);
+  return float4(c / 16.0, a / 16.0);
 }
 // postfx_basictex: oC0 = tex (verified: `max oC0, r0, r0`).
 float4 ps_blit(VSOut i) : SV_Target {
