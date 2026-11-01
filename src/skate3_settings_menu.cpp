@@ -566,15 +566,18 @@ bool IsServerHost(const std::string& host) {
 }
 
 // The address the online hosts currently point at (the redirector's
-// target), or empty when no override is set.
+// target), or empty when no override is set. Hosts are tried in
+// g_server_hosts order so the redirector wins over a stale web-tier entry.
 std::string ServerAddressFromCvar() {
   if (!HasCvar("net_host_overrides")) {
     return {};
   }
-  for (const auto& [host, target] :
-       ParseHostOverrides(rex::cvar::Query<std::string>("net_host_overrides"))) {
-    if (IsServerHost(host)) {
-      return target;
+  const auto pairs = ParseHostOverrides(rex::cvar::Query<std::string>("net_host_overrides"));
+  for (const std::string& h : g_server_hosts) {
+    for (const auto& [host, target] : pairs) {
+      if (host == h) {
+        return target;
+      }
     }
   }
   return {};
@@ -3137,6 +3140,23 @@ void SettingsMenu::OnDraw(ImGuiIO& io) {
 #endif
 
 namespace skate3 {
+
+void SyncServerHostOverrides(const std::vector<std::string>& hosts,
+                             const std::filesystem::path& config_path) {
+  g_server_hosts = hosts;
+  const std::string address = ServerAddressFromCvar();
+  if (address.empty()) {
+    return;
+  }
+  const std::string before = rex::cvar::Query<std::string>("net_host_overrides");
+  SetServerAddress(address);
+  const std::string after = rex::cvar::Query<std::string>("net_host_overrides");
+  if (after != before) {
+    REXLOG_INFO("net_host_overrides: pointed every online host at {} ('{}' -> '{}')", address,
+                before, after);
+    rex::cvar::SaveConfigValues(config_path, GetSettingsCvars());
+  }
+}
 
 bool RelaunchGame() {
 #if defined(_WIN32)

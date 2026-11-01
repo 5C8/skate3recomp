@@ -11,7 +11,7 @@ if(SKATE3_STATIC_MSVC_RUNTIME)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(skate3 VERSION 1.0.6 LANGUAGES CXX)
+project(skate3 VERSION 1.0.7 LANGUAGES CXX)
 
 # Existing checkouts may still have the retired movie override in generated
 # sources. Repair them before compiling; fresh codegen keeps the original call.

@@ -1,5 +1,21 @@
 # Release notes
 
+## 1.0.7
+
+- **Online web pages:** skate.Feed, leaderboards, team pages and the other
+  EAWebKit pages now open on the community server. The pages are loaded from
+  the host `skate3_web`, which has no real DNS entry; **Server Address** now
+  points it at the server along with the other online hosts.
+- **"Updating Reports" delay:** the Xbox 360 build sends its profile and
+  AI-profile uploads to the fixed address `10.10.237.194`, which **Server
+  Address** did not redirect. Each upload waited out 5-second connect timeouts
+  and retries, so going online sat on "Updating Reports". That address now
+  follows **Server Address** too.
+- **Existing configs repaired at startup:** if a server address is already set,
+  the game points every online host at it when it starts and saves
+  `settings.toml`, so nothing has to be re-entered. Previously the repair only
+  ran once the Settings menu had been opened.
+
 ## 1.0.6
 
 - **Create-a-skater pictures:** the custom renderer now draws the skater
