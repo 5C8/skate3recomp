@@ -79,6 +79,10 @@ REXCVAR_DEFINE_BOOL(skate3_native_render_scene, true, "Skate 3",
 // thread. Opt-in; Release compiles it out entirely.
 REXCVAR_DEFINE_BOOL(skate3_native_render_scene_pass_census, false, "Skate 3",
                     "Record the per-draw pass census and pass ring (diagnostic)");
+REXCVAR_DEFINE_BOOL(skate3_native_render_photo_trace, false, "Skate 3",
+                    "Log every draw, clear, resolve and PhotoEffects layer of the "
+                    "create-a-skater profile snapshot (diagnostic; only active while "
+                    "the game generates a snapshot)");
 REXCVAR_DEFINE_BOOL(skate3_native_render_scene_draw_fetch_adopt, true, "Skate 3",
                     "Adopt the texture bound at draw-time fetch slot 4 as the item's "
                     "diffuse (the Massive event-ad artwork / player-photo billboard "
@@ -2425,6 +2429,11 @@ bool BuildItemFromMesh(uint8_t* base, uint32_t mesh, DrawItem& item) {
               item.env_family = 9;
             } else if (is("animated.tree", 14)) {
               item.env_family = 10;
+            } else if (is("animated.flag", 14)) {
+              // vertexanimate_defaultVS/PS: the wind-waved flag cloth (see
+              // the fam-19 branches in scene.hlsl). Without a family it took
+              // the legacy static fallback: flags hung frozen.
+              item.env_family = 19;
             } else if (is("proxyworld.", 11)) {
               item.env_family = 11;
             } else if (is("incandescent.default", 21)) {
@@ -2434,6 +2443,13 @@ bool BuildItemFromMesh(uint8_t* base, uint32_t mesh, DrawItem& item) {
               // g_fAnimationTime x the u/vAnimationSpeed channels (the
               // stadium LED chyron band).
               item.env_family = 14;
+            } else if (std::strstr(mat_name, "incandescent") != nullptr) {
+              // transparentincandescent_defaultPS (the neon signage: cinema
+              // tubes, film-reel strip, marquee lettering): baseincandescent's
+              // ucode with oC0.w = diffuse alpha, drawn blended. Without a
+              // family it took the legacy opaque fallback (black panels).
+              item.env_family = 18;
+              item.transparent = true;
             } else if (is("advertisement.default", 22)) {
               // advertisement_defaultPS: diffuse x floored/shadow-clamped
               // lightmap x multiplier through its own tone curve (no fog,
@@ -2502,6 +2518,19 @@ bool BuildItemFromMesh(uint8_t* base, uint32_t mesh, DrawItem& item) {
               item.dynobj = 6;
             } else if (is("environmentpark.", 16)) {
               item.dynobj = 4;
+            }
+            // DIAGNOSTIC: every distinct material name once, with the family
+            // it got (the unknown-environment report above misses materials
+            // outside the environment* names, e.g. emissive signage).
+            {
+              static std::mutex s_all_mutex;
+              static std::unordered_set<std::string> s_all;
+              std::lock_guard<std::mutex> lock(s_all_mutex);
+              if (s_all.size() < 1024 && s_all.insert(mat_name).second) {
+                REXLOG_INFO("native-scene: material '{}' -> env_family={} dynobj={}{}{}", mat_name,
+                            int(item.env_family), int(item.dynobj),
+                            item.transparent ? " transparent" : "", item.water ? " water" : "");
+              }
             }
           }
           continue;
@@ -3939,15 +3968,143 @@ struct PhotoCapture {
   float rows[4][4] = {};
   std::vector<uint64_t> draw_keys;
   uint32_t overlay_draws = 0;
+  // The pass's 2D layers as indices into g_frame_2d (captured there by the
+  // regular 2D path, which drops them from the screen overlay as offscreen
+  // compose draws): from the pass start / its colour clear (everything
+  // earlier is overwritten by that clear) up to the skater, and after it.
+  size_t twod_begin = 0;
+  size_t twod_clear = SIZE_MAX;
+  size_t twod_split = SIZE_MAX;
+  // The skater as the pass itself draws it, per (ib,vb) key: the latest
+  // scene's item re-captured from the pass's own constant bank, i.e. the
+  // game's photo POSE (bone palette / rigid world) and lighting rows, not the
+  // editor pose the on-screen frame carries.
+  std::unordered_map<uint64_t, DrawItem> posed;
+  // Pieces the published scene does not have (the import-skater screen
+  // photographs skaters that are never on screen): captured from the pass
+  // itself by CaptureDynamicState (photo_divert) ...
+  std::unordered_map<uint64_t, DrawItem> built;
+  // ... and the pose each such piece's own draw used (a probe through the
+  // same skinned / rigid capture), for pieces that capture left pending.
+  struct RawPose {
+    DrawItem probe;  // bones (skinned) or rigid ropa world (probe.skinned = false)
+    bool skinned_ok = false;
+    float world[16] = {};
+    bool world_ok = false;
+    bool from_built = false;  // probe started from the pass's own item
+  };
+  std::unordered_map<uint64_t, RawPose> raw_pose;
+  // Draw-time fetch slot 3 (the character shaders' diffuse: cacstamp_*,
+  // cac_cloth/face/hair, defaultcharacter) per piece. A photo-only piece is
+  // built once, inside the pass, where its CAS composite / streamed outfit
+  // texture may not resolve through the material walk yet; the game's own
+  // binding is the ground truth.
+  std::unordered_map<uint64_t, std::array<uint32_t, 6>> diffuse_words;
 };
 PhotoCapture g_photo_cap;  // guest render thread only
+
+size_t Frame2dCount() {
+  std::lock_guard<std::mutex> lock(g_2d_mutex);
+  return g_frame_2d.size();
+}
 std::mutex g_photo_jobs_mutex;
 std::vector<PhotoJob> g_photo_jobs;
+
+// ---- Snapshot trace (diagnostic, see skate3_native_render_photo_trace) ----
+// The emulated GPU cannot produce the create-a-skater snapshot, so the native
+// path has to reproduce it from what the game submits. The trace logs that
+// submission: every draw / clear / resolve from the snapshot camera setup to
+// the JPEG encode, and every PhotoEffects layer record.
+struct PhotoTrace {
+  bool active = false;
+  int64_t start_ms = 0;
+  uint32_t lines = 0;
+  uint32_t seq = 0;
+};
+PhotoTrace g_photo_trace;  // guest render thread only
+
+int64_t PhotoTraceNowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+bool PhotoTraceActive() {
+  if (!g_photo_trace.active) {
+    return false;
+  }
+  // A window that never saw its JPEG encode closes itself.
+  if (PhotoTraceNowMs() - g_photo_trace.start_ms > 8000 || g_photo_trace.lines > 6000) {
+    REXLOG_INFO("native-scene: PHOTO-TRACE end (timeout/cap, {} lines)", g_photo_trace.lines);
+    g_photo_trace.active = false;
+  }
+  return g_photo_trace.active;
+}
+
+void PhotoTraceBegin(const char* why) {
+  if (!REXCVAR_GET(skate3_native_render_photo_trace)) {
+    return;
+  }
+  if (!g_photo_trace.active) {
+    g_photo_trace = PhotoTrace{};
+    g_photo_trace.active = true;
+    g_photo_trace.start_ms = PhotoTraceNowMs();
+    REXLOG_INFO("native-scene: PHOTO-TRACE begin ({}) frame={}", why, g_guest_frame);
+  } else {
+    REXLOG_INFO("native-scene: PHOTO-TRACE mark ({}) frame={}", why, g_guest_frame);
+  }
+}
+
+void PhotoTraceEnd(const char* why) {
+  if (g_photo_trace.active) {
+    REXLOG_INFO("native-scene: PHOTO-TRACE end ({}) frame={} lines={}", why, g_guest_frame,
+                g_photo_trace.lines);
+    g_photo_trace.active = false;
+  }
+}
+
+// Texture object -> "addr/fmt/WxH" from its fetch constant (words at +0x1C..+0x24).
+std::string PhotoTraceTexture(uint8_t* base, uint32_t tex) {
+  uint32_t w0 = 0, w1 = 0, w2 = 0;
+  if (tex < 0x10000 || !GuestTryLoadU32(base, tex + 0x1C, &w0) ||
+      !GuestTryLoadU32(base, tex + 0x20, &w1) || !GuestTryLoadU32(base, tex + 0x24, &w2)) {
+    return fmt::format("{:08X}(unreadable)", tex);
+  }
+  return fmt::format("{:08X}[{:08X}/f{}/{}x{}{}]", tex, w1 & 0x1FFFF000u, w1 & 0x3Fu,
+                     (w2 & 0x1FFFu) + 1, ((w2 >> 13) & 0x1FFFu) + 1,
+                     (w0 >> 31) != 0 ? "/tiled" : "");
+}
+
+void PhotoTraceCall(uint8_t* base, const char* label, uint32_t r3, uint32_t r4, uint32_t r5,
+                    uint32_t r6, uint32_t r7, uint32_t dump_ptr, uint32_t dump_len,
+                    uint32_t tex) {
+  if (!PhotoTraceActive()) {
+    return;
+  }
+  ++g_photo_trace.lines;
+  std::string hex;
+  if (dump_ptr >= 0x10000) {
+    for (uint32_t i = 0; i < dump_len; i += 4) {
+      uint32_t w = 0;
+      if (!GuestTryLoadU32(base, dump_ptr + i, &w)) {
+        hex += " ??";
+        break;
+      }
+      hex += fmt::format("{}{:08X}", i ? " " : "", w);
+    }
+  }
+  REXLOG_INFO("native-scene: PHOTO-TRACE #{} f{} {} r3={:08X} r4={:08X} r5={:08X} r6={:08X} "
+              "r7={:08X}{}{}{}",
+              g_photo_trace.seq++, g_guest_frame, label, r3, r4, r5, r6, r7,
+              tex != 0 ? " tex=" : "", tex != 0 ? PhotoTraceTexture(base, tex) : std::string(),
+              hex.empty() ? std::string() : " rec=[" + hex + "]");
+}
 
 void OnPhotoApply(bool enter) {
   if (enter) {
     g_photo_cap = PhotoCapture{};
     g_photo_cap.active = SceneEnabled();
+    g_photo_cap.twod_begin = Frame2dCount();
     return;
   }
   if (g_photo_cap.active) {
@@ -4012,13 +4169,96 @@ static void BuildPhotoJob(uint8_t* base, uint32_t dest_tex) {
   }
   auto scene = std::make_shared<FrameScene>(*latest);
   scene->photo_job = true;
-  // The pass's pieces: the latest scene's items drawn with the same buffers.
+  // The pass's pieces: the latest scene's items drawn with the same buffers,
+  // in the pose the pass itself drew them (cap.posed) where it was captured.
   std::vector<DrawItem> items;
+  size_t posed = 0;
   std::sort(cap.draw_keys.begin(), cap.draw_keys.end());
+  std::unordered_set<uint64_t> served;
   for (const DrawItem& it : latest->items) {
     const uint64_t key = (uint64_t(it.ib_obj) << 32) | it.vb_obj;
     if (std::binary_search(cap.draw_keys.begin(), cap.draw_keys.end(), key)) {
-      items.push_back(it);
+      const auto p = cap.posed.find(key);
+      if (p != cap.posed.end()) {
+        items.push_back(p->second);
+        ++posed;
+      } else {
+        items.push_back(it);
+      }
+      served.insert(key);
+    }
+  }
+  // Photo-only pieces (import-skater screen): the items the pass itself
+  // submitted (CaptureDynamicState photo_divert), posed by their own draws
+  // where the submit-exit capture stayed pending (multi-pass pieces).
+  size_t built = 0;
+  for (auto& [key, item] : cap.built) {
+    if (served.count(key) != 0 ||
+        !std::binary_search(cap.draw_keys.begin(), cap.draw_keys.end(), key)) {
+      continue;
+    }
+    DrawItem d = std::move(item);
+    const auto rp = cap.raw_pose.find(key);
+    if (d.pending && rp != cap.raw_pose.end()) {
+      if (d.skinned && rp->second.skinned_ok && rp->second.from_built) {
+        // The probe IS this item, captured at its own draw (pose, lighting).
+        d = rp->second.probe;
+        d.pending = false;
+      } else if (d.skinned && rp->second.skinned_ok) {
+        if (rp->second.probe.skinned) {
+          d.bones = rp->second.probe.bones;
+        } else {  // ropa garment placed by its rigid world
+          d.skinned = false;
+          d.bones.clear();
+          std::memcpy(d.world, rp->second.probe.world, sizeof(d.world));
+        }
+        d.pending = false;
+      } else if (!d.skinned && rp->second.world_ok) {
+        std::memcpy(d.world, rp->second.world, sizeof(d.world));
+        d.pending = false;
+      }
+    }
+    if (d.pending) {
+      continue;  // no pose this pass staged for it
+    }
+    // The game's draw-time diffuse when the material walk did not resolve
+    // that texture (see PhotoCapture::diffuse_words).
+    const auto dw = cap.diffuse_words.find(key);
+    if (dw != cap.diffuse_words.end()) {
+      uint32_t own_w1 = 0;
+      const bool own = d.diffuse_tex != 0 && GuestTryLoadU32(base, d.diffuse_tex + 8 * 4, &own_w1) &&
+                       (own_w1 & 0x1FFFF000u) == (dw->second[1] & 0x1FFFF000u);
+      if (!own) {
+        std::memcpy(d.diffuse_fetch, dw->second.data(), sizeof(d.diffuse_fetch));
+      }
+    }
+    items.push_back(std::move(d));
+    served.insert(key);
+    ++built;
+    ++posed;
+  }
+  // DIAGNOSTIC (import-skater photo pieces): what each served piece carries,
+  // to compare the photo-only ones against the editor-sourced ones.
+  {
+    static std::atomic<uint32_t> s_piece_logs{0};
+    if (s_piece_logs.load(std::memory_order_relaxed) < 400) {
+      for (const DrawItem& it : items) {
+        const uint64_t key = (uint64_t(it.ib_obj) << 32) | it.vb_obj;
+        s_piece_logs.fetch_add(1, std::memory_order_relaxed);
+        REXLOG_INFO(
+            "native-scene: photo piece {:016X} mesh={:08X} {} fam={} skin={} ropa={} face={} "
+            "hair={} alpha={} cloth_quads={} bones={} draws={} rows14=({:.2f},{:.2f}) "
+            "vb={:08X}/{} ib={:08X}/{} pending={} dbg={} diffuse={:08X} fetch={:08X} "
+            "draw-slot3={:08X} spec={:08X} hair_alpha={:08X}",
+            key, it.mesh, cap.posed.count(key) ? "editor" : "photo-only", int(it.char_family),
+            it.skinned ? 1 : 0, it.ropa ? 1 : 0, it.char_face ? 1 : 0, it.hair ? 1 : 0,
+            it.char_alpha ? 1 : 0, it.cloth_quads ? 1 : 0, it.bones.size() / 12, it.draws.size(),
+            it.char_rows[14 * 4 + 0], it.char_rows[14 * 4 + 1], it.vb_addr, it.vb_bytes,
+            it.ib_addr, it.ib_count, it.pending ? 1 : 0, int(it.dbg_src), it.diffuse_tex,
+            it.diffuse_fetch[1],
+            cap.diffuse_words.count(key) ? cap.diffuse_words.at(key)[1] : 0u, it.spec_tex,
+            it.hair_alpha_tex);
+      }
     }
   }
   scene->items = std::move(items);
@@ -4036,7 +4276,33 @@ static void BuildPhotoJob(uint8_t* base, uint32_t dest_tex) {
   if (cap.clear_valid) {
     std::memcpy(scene->clear_color, cap.clear, sizeof(scene->clear_color));
   }
+  // The pass's 2D layers, normalized now: their vertex payloads sit in the
+  // inline ring, which later frames overwrite.
+  auto layers = std::make_shared<PhotoLayers>();
+  layers->clear_valid = cap.clear_valid;
+  std::memcpy(layers->clear, cap.clear, sizeof(layers->clear));
+  {
+    std::vector<Draw2d> pass_2d;
+    size_t split = 0;
+    {
+      std::lock_guard<std::mutex> lock(g_2d_mutex);
+      const size_t from = cap.twod_clear != SIZE_MAX ? cap.twod_clear : cap.twod_begin;
+      if (from <= g_frame_2d.size()) {
+        pass_2d.assign(g_frame_2d.begin() + from, g_frame_2d.end());
+        split = cap.twod_split != SIZE_MAX && cap.twod_split >= from
+                    ? std::min(cap.twod_split - from, pass_2d.size())
+                    : pass_2d.size();
+      }
+    }
+    for (size_t i = 0; i < pass_2d.size(); ++i) {
+      Draw2d d = pass_2d[i];
+      if (Normalize2dDraw(base, d)) {
+        (i < split ? layers->pre : layers->post).push_back(std::move(d));
+      }
+    }
+  }
   PhotoJob job;
+  job.layers = layers;
   const uint32_t w1 = REX_LOAD_U32(dest_tex + 0x20);
   job.dest_phys = w1 & 0x1FFFF000u;
   job.dest_tex = dest_tex;
@@ -4044,9 +4310,12 @@ static void BuildPhotoJob(uint8_t* base, uint32_t dest_tex) {
                        std::chrono::steady_clock::now().time_since_epoch())
                        .count();
   REXLOG_INFO(
-      "native-scene: photo pass job -> {:08X}: {} pieces of {} drawn keys, clear {} "
-      "({:.3f},{:.3f},{:.3f}), cam ({:.2f},{:.2f},{:.2f}) aspect {:.3f}, {} overlay draws",
-      job.dest_phys, scene->items.size(), cap.draw_keys.size(), cap.clear_valid ? "yes" : "NO",
+      "native-scene: photo pass job -> {:08X}: {} pieces ({} in the pass's own pose, {} "
+      "photo-only of {} pass captures / {} draw poses) of {} drawn keys, {} + {} 2D layers, "
+      "clear {} ({:.3f},{:.3f},{:.3f}), cam ({:.2f},{:.2f},{:.2f}) aspect {:.3f}, {} overlay draws",
+      job.dest_phys, scene->items.size(), posed, built, cap.built.size(), cap.raw_pose.size(),
+      cap.draw_keys.size(), layers->pre.size(),
+      layers->post.size(), cap.clear_valid ? "yes" : "NO",
       cap.clear[0], cap.clear[1], cap.clear[2], cam[0], cam[1], cam[2],
       // |row1.xyz| / |row0.xyz| = m11 / m00 (the view rotation keeps lengths)
       std::sqrt((cap.rows[1][0] * cap.rows[1][0] + cap.rows[1][1] * cap.rows[1][1] +
@@ -4141,6 +4410,9 @@ void DumpRecentPasses(uint8_t* base, const char* why) {
 }
 
 void OnResolve(uint8_t* base, uint32_t flags, uint32_t dest_tex) {
+  if (PhotoTraceActive()) {
+    PhotoTraceCall(base, "resolve", flags, dest_tex, 0, 0, 0, 0, 0, dest_tex);
+  }
   // The portrait pass's colour resolve into the full-size screenshot target
   // (RenderMan+1276 -> +664, the texture ExtractTextureImageData reads).
   if (g_photo_cap.active && (flags & 0x4u) == 0 && dest_tex >= 0x10000) {
@@ -4203,12 +4475,19 @@ std::atomic<int> g_diag_cam_log{0};
 void DiagArmCameraLog() { g_diag_cam_log.store(1, std::memory_order_relaxed); }
 
 void OnClearF(uint8_t* base, uint32_t device, uint32_t flags, uint32_t color_ptr) {
+  if (PhotoTraceActive()) {
+    PhotoTraceCall(base, "clear", device, flags, color_ptr, 0, 0,
+                   GuestReadableApprox(base, color_ptr) ? color_ptr : 0, 16, 0);
+  }
   if (g_photo_cap.active && (flags & 0x0Fu) != 0 && color_ptr >= 0x10000 &&
       GuestReadableApprox(base, color_ptr)) {
     for (int c = 0; c < 4; ++c) {
       g_photo_cap.clear[c] = LoadGuestF32(base, color_ptr + uint32_t(c) * 4u);
     }
     g_photo_cap.clear_valid = true;
+    if (g_photo_cap.twod_split == SIZE_MAX) {
+      g_photo_cap.twod_clear = Frame2dCount();
+    }
   }
   if (color_ptr >= 0x10000 && GuestReadableApprox(base, color_ptr)) {
     PassRecord pr;
@@ -5424,8 +5703,10 @@ bool BankHasViewProj(uint8_t* base, uint32_t bank) {
   return dot > 0.995f * std::sqrt(n2 * n3);
 }
 
+// allow_aux: the create-a-skater photo job captures the pose its own portrait
+// pass draws (see PhotoCapture::posed); every scene capture refuses those.
 bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
-                         DrawItem& item) {
+                         DrawItem& item, bool allow_aux = false) {
   // Never take a palette from a bank without a viewproj (the texture-space
   // unwrap pass, see BankHasViewProj); the caller keeps the item pending and
   // the real draw of the same buffers captures it.
@@ -5438,7 +5719,7 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
   // stores (see BankIsAuxPerspective). The item stays pending; a later
   // main-view draw of these buffers resolves it, and portrait-only frames
   // publish nothing (BuildFrameScene's aux-view gate).
-  if (BankIsAuxPerspective(base, bank)) {
+  if (!allow_aux && BankIsAuxPerspective(base, bank)) {
     static std::atomic<uint64_t> s_aux_refused{0};
     const uint64_t n = s_aux_refused.fetch_add(1, std::memory_order_relaxed);
     if (n < 4 || (n & 4095u) == 0) {
@@ -5558,7 +5839,17 @@ uint32_t CaptureDynamicState(uint8_t* base, uint32_t ctx, bool world_path,
   // post-draw fixups (FIFO oldest-pending) and publish a ghost at the
   // player's pose. drew_inside guarantees the bank is the pass's own, so
   // its c0..c3 viewproj identifies the pass (see BankIsAuxPerspective).
-  if (drew_inside && BankIsAuxPerspective(base, bank)) {
+  // Exception: inside a create-a-skater photo pass the item is captured as
+  // usual but handed to the photo job instead of the frame (photo_divert;
+  // the import-skater screen photographs skaters that are never on screen,
+  // so the published scene has no item to copy for them).
+  // Keyed on the pass scope alone: the PhotoEffects passes use a 16:9 camera,
+  // which BankIsAuxPerspective (tall portrait cards only) does not flag. Both
+  // submit paths count: the import-skater screen's skaters come through the
+  // view's sort lists (world_path, captured before they draw; their pose is
+  // the draw-time PhotoCapture::raw_pose), not RenderMesh.
+  const bool photo_divert = g_photo_cap.active && (drew_inside || world_path);
+  if (drew_inside && !photo_divert && BankIsAuxPerspective(base, bank)) {
     return 0;
   }
   // Guest-thread capture cost telemetry (folded per frame in BuildFrameScene).
@@ -5674,7 +5965,7 @@ uint32_t CaptureDynamicState(uint8_t* base, uint32_t ctx, bool world_path,
         ReadCtxInstanceWorld(base, item.ctx, ctx_world);
     // Aux perspective passes (portrait RTTs) stage worlds at the off-map
     // portrait stage; defer like a foreign bank (see BankIsAuxPerspective).
-    const bool bank_ok = own_draw_last && !BankIsAuxPerspective(base, bank) &&
+    const bool bank_ok = own_draw_last && (photo_divert || !BankIsAuxPerspective(base, bank)) &&
                          BankRigidWorld(base, bank, item.world);
     if (bank_ok && have_ctx_world) {
       // Translation-only trigger: wrong-clone worlds sit meters apart;
@@ -5695,7 +5986,9 @@ uint32_t CaptureDynamicState(uint8_t* base, uint32_t ctx, bool world_path,
       item.pending = true;
       g_rigid_pending.fetch_add(1, std::memory_order_relaxed);
     }
-    if (!item.pending && item.ctx != 0) {
+    // Photo captures stage at the portrait stage; never let them feed the
+    // on-screen instances' world cache (same ctx as the editor skater).
+    if (!item.pending && item.ctx != 0 && !photo_divert) {
       if (g_rigid_world_cache.size() > 32768) {
         g_rigid_world_cache.clear();  // map-change growth backstop
       }
@@ -5733,7 +6026,7 @@ uint32_t CaptureDynamicState(uint8_t* base, uint32_t ctx, bool world_path,
     item.pending = world_path || !own_draw_last || (passes > 1 && passes < 16) ||
                    palette_base == 0;
     if (!item.pending) {
-      if (CaptureSkinnedState(base, bank, palette_base, item)) {
+      if (CaptureSkinnedState(base, bank, palette_base, item, /*allow_aux=*/photo_divert)) {
         g_palette_snapshots.fetch_add(1, std::memory_order_relaxed);
         item.dbg_src = 1;
         item.caster_bank = BankIsOrtho(base, bank);
@@ -5742,6 +6035,15 @@ uint32_t CaptureDynamicState(uint8_t* base, uint32_t ctx, bool world_path,
       }
     }
     g_skinned_items.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (photo_divert) {
+    // Photo-only piece (see photo_divert): BuildPhotoJob serves it, with the
+    // pass's per-draw pose where this submit-exit capture stayed pending.
+    const uint64_t key = (uint64_t(item.ib_obj) << 32) | item.vb_obj;
+    if (g_photo_cap.built.size() < 256) {
+      g_photo_cap.built.emplace(key, std::move(item));
+    }
+    return 0;
   }
   if (g_recording.load(std::memory_order_relaxed)) {
     // Preserve the buffer payload for offline decode (streaming arenas are
@@ -6032,6 +6334,8 @@ enum : uint32_t {
   kSnTransEnv = 1u << 3,
   kSnAd = 1u << 4,
   kSnOceanRefl = 1u << 5,
+  // baseincandescent / transparentincandescent (not scrollincandescent).
+  kSnIncand = 1u << 6,
 };
 uint32_t ShaderNameFlags(uint8_t* base, uint32_t obj) {
   if (obj < 0x10000 || !GuestReadableApprox(base, obj)) {
@@ -6061,6 +6365,10 @@ uint32_t ShaderNameFlags(uint8_t* base, uint32_t obj) {
   // layout, they differ only in the alpha output.
   if (std::strstr(text, "\\flowingwater") != nullptr) bits |= kSnFlowWater;
   if (std::strstr(text, "\\scrollincandescent") != nullptr) bits |= kSnScroll;
+  if (std::strstr(text, "\\baseincandescent") != nullptr ||
+      std::strstr(text, "\\transparentincandescent") != nullptr) {
+    bits |= kSnIncand;
+  }
   if (std::strstr(text, "\\ocean_default") != nullptr) bits |= kSnOcean;
   if (std::strstr(text, "\\transparentenvironment_default") != nullptr) bits |= kSnTransEnv;
   if (std::strstr(text, "\\advertisement") != nullptr) bits |= kSnAd;
@@ -6884,6 +7192,47 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
                     r[6][0],r[6][1],r[6][2],r[6][3]);
       }
     }
+    // vertexanimate_defaultVS/PS (animated.flag): VS c7..c10 drive the
+    // wave (c7.x = the same animation clock as the tree), PS c0.x scales
+    // the lightmap. Same both-trackers test as the tree.
+    static std::unordered_map<uint32_t, bool> s_flag_objects;
+    const auto is_flag = [&](uint32_t obj) {
+      const auto found = s_flag_objects.find(obj);
+      if (found != s_flag_objects.end()) return found->second;
+      const std::string leaf = ShaderLeafName(base, obj);
+      const bool match = leaf == "vertexanimate_defaultVS" || leaf == "vertexanimate_defaultPS";
+      if (s_flag_objects.size() < 4096) s_flag_objects.emplace(obj, match);
+      return match;
+    };
+    const uint32_t ps_bank = g_ps_bank.load(std::memory_order_relaxed);
+    if (ps_bank != 0 && (is_flag(vs_obj) || is_flag(ps_obj))) {
+      float rows[20];
+      for (uint32_t r = 0; r < 4; ++r) {
+        for (uint32_t c = 0; c < 4; ++c) {
+          rows[r * 4 + c] = LoadGuestF32(base, bank + ((7 + r) * 4 + c) * 4);
+        }
+      }
+      for (uint32_t c = 0; c < 4; ++c) {
+        rows[16 + c] = LoadGuestF32(base, ps_bank + c * 4);
+      }
+      if (std::isfinite(rows[16]) && rows[16] > 0.0f && rows[16] < 1e4f) {
+        rows[19] = 1.0f;
+        {
+          std::lock_guard<std::mutex> lock(g_tree_anim_mutex);
+          std::memcpy(g_flag_anim_rows, rows, sizeof(rows));
+          g_flag_anim_have = true;
+        }
+        static std::atomic<bool> s_flag_logged{false};
+        if (!s_flag_logged.exchange(true, std::memory_order_relaxed)) {
+          REXLOG_INFO("native-scene: vertexanimate capture c7=({:.6g},{:.6g},{:.6g},{:.6g}) "
+                      "c8=({:.6g},{:.6g},{:.6g},{:.6g}) c9=({:.6g},{:.6g},{:.6g},{:.6g}) "
+                      "c10=({:.6g},{:.6g},{:.6g},{:.6g}) ps_c0.x={:.6g}",
+                      rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7],
+                      rows[8], rows[9], rows[10], rows[11], rows[12], rows[13], rows[14],
+                      rows[15], rows[16]);
+        }
+      }
+    }
   }
   // The VS bank is fixed for the whole post-draw path: classify it once.
   const bool bank_ortho = BankIsOrtho(base, bank);
@@ -6900,10 +7249,82 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
           }
         }
         g_photo_cap.cam_valid = true;
+        g_photo_cap.twod_split = Frame2dCount();  // 2D layers before / after the skater
       }
       const uint64_t key = g_last_draw_ibvb.load(std::memory_order_relaxed);
       if (key != 0 && g_photo_cap.draw_keys.size() < 256) {
         g_photo_cap.draw_keys.push_back(key);
+      }
+      // The piece's draw-time diffuse binding (see PhotoCapture::diffuse_words).
+      if (key != 0 && g_photo_cap.diffuse_words.size() < 256) {
+        const uint32_t dev = g_device.load(std::memory_order_relaxed);
+        if (dev != 0) {
+          std::array<uint32_t, 6> w{};
+          for (uint32_t k = 0; k < 6; ++k) {
+            w[k] = REX_LOAD_U32(dev + 0x480 + 3 * 24 + k * 4);
+          }
+          if ((w[0] & 3u) == 2u && (w[1] & 0x1FFFF000u) != 0) {
+            g_photo_cap.diffuse_words.emplace(key, w);
+          }
+        }
+      }
+      // The photo pose: this draw's own bank (first draw of each piece; the
+      // hair's extra passes reuse the same pose).
+      if (key != 0 && g_photo_cap.posed.find(key) == g_photo_cap.posed.end()) {
+        std::shared_ptr<const FrameScene> latest;
+        {
+          std::lock_guard<std::mutex> lock(g_scene_mutex);
+          latest = g_scene;
+        }
+        bool in_latest = false;
+        if (latest) {
+          for (const DrawItem& it : latest->items) {
+            if (((uint64_t(it.ib_obj) << 32) | it.vb_obj) != key) {
+              continue;
+            }
+            in_latest = true;
+            DrawItem d = it;
+            bool posed = false;
+            if (d.skinned) {
+              const uint32_t palette_base = BankPaletteBase(base, bank);
+              posed = palette_base != 0 &&
+                      CaptureSkinnedState(base, bank, palette_base, d, /*allow_aux=*/true);
+            } else {
+              float world[16];
+              if (BankRigidWorld(base, bank, world)) {
+                std::memcpy(d.world, world, sizeof(world));
+                posed = true;
+              }
+            }
+            if (posed) {
+              g_photo_cap.posed.emplace(key, std::move(d));
+            }
+            break;
+          }
+        }
+        // A photo-only piece (not in the published scene): record this
+        // draw's own pose for BuildPhotoJob (see PhotoCapture::raw_pose).
+        if (!in_latest && g_photo_cap.raw_pose.find(key) == g_photo_cap.raw_pose.end() &&
+            g_photo_cap.raw_pose.size() < 256) {
+          PhotoCapture::RawPose rp;
+          // Sort-list pieces were captured (pending) before they drew: start
+          // from that item so the capture also stages its lighting rows /
+          // hair tint (CaptureCharLighting keys on its character family).
+          const auto pre = g_photo_cap.built.find(key);
+          if (pre != g_photo_cap.built.end()) {
+            rp.probe = pre->second;
+            rp.from_built = true;
+          }
+          rp.probe.skinned = true;
+          const uint32_t palette_base = BankPaletteBase(base, bank);
+          rp.skinned_ok = palette_base != 0 &&
+                          CaptureSkinnedState(base, bank, palette_base, rp.probe,
+                                              /*allow_aux=*/true);
+          rp.world_ok = BankRigidWorld(base, bank, rp.world);
+          if (rp.skinned_ok || rp.world_ok) {
+            g_photo_cap.raw_pose.emplace(key, std::move(rp));
+          }
+        }
       }
     } else if (flags2d != 0 && g_photo_cap.cam_valid) {
       ++g_photo_cap.overlay_draws;
@@ -6958,6 +7379,60 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
     }
   }
   DrawSectMark(1);
+  // Snapshot trace: every draw inside the create-a-skater snapshot window.
+  if (PhotoTraceActive()) {
+    const uint32_t p2100 = g_rs_ptr_2100.load(std::memory_order_relaxed);
+    const uint32_t dev = g_device.load(std::memory_order_relaxed);
+    if (p2100 != 0 && dev != 0) {
+      const auto leaf = [&](uint32_t obj) -> std::string {
+        if (obj < 0x10000 || !GuestReadableApprox(base, obj)) {
+          return "-";
+        }
+        char path[200] = {};
+        if (!GuestTryCopy(path, base + ShaderPathAddr(base, obj), sizeof(path) - 1)) {
+          return "?";
+        }
+        const char* l = std::strrchr(path, 92);
+        std::string out(l != nullptr ? l + 1 : path);
+        const size_t dot = out.find(".updb");
+        return dot == std::string::npos ? out : out.substr(0, dot);
+      };
+      std::string tex;
+      for (uint32_t s = 0; s < 8; ++s) {
+        const uint32_t w1 = REX_LOAD_U32(dev + 0x480 + s * 24 + 4);
+        const uint32_t w2 = REX_LOAD_U32(dev + 0x480 + s * 24 + 8);
+        if ((w1 & 0x1FFFF000u) == 0) {
+          continue;
+        }
+        tex += fmt::format(" tf{}={:08X}/f{}/{}x{}", s, w1 & 0x1FFFF000u, w1 & 0x3Fu,
+                           (w2 & 0x1FFFu) + 1, ((w2 >> 13) & 0x1FFFu) + 1);
+      }
+      float c[4][4];
+      for (int k = 0; k < 4; ++k) {
+        for (int i = 0; i < 4; ++i) {
+          c[k][i] = LoadGuestF32(base, bank + uint32_t(k * 4 + i) * 4);
+        }
+      }
+      uint32_t blend = 0, colctl = 0;
+      if (const uint32_t p2200 = g_rs_ptr_2200.load(std::memory_order_relaxed)) {
+        blend = REX_LOAD_U32(p2200 + 1 * 4);
+        colctl = REX_LOAD_U32(p2200 + 2 * 4);
+      }
+      PhotoTraceCall(base, "draw", 0, 0, 0, 0, 0, 0, 0, 0);
+      REXLOG_INFO(
+          "native-scene: PHOTO-TRACE   vp={}x{} func={} 2d={:X} {} [{} | {}] ib/vb={:016X} "
+          "blend={:08X} colctl={:08X} mask={:08X}{} c0=({:.4g},{:.4g},{:.4g},{:.4g}) "
+          "c1=({:.4g},{:.4g},{:.4g},{:.4g}) c2=({:.4g},{:.4g},{:.4g},{:.4g}) "
+          "c3=({:.4g},{:.4g},{:.4g},{:.4g})",
+          uint32_t(std::fabs(LoadGuestF32(base, p2100 + 0xF * 4)) * 2.0f + 0.5f),
+          uint32_t(std::fabs(LoadGuestF32(base, p2100 + 0x11 * 4)) * 2.0f + 0.5f), func,
+          flags2d, bank_ortho ? "ortho" : "persp", leaf(g_cur_vs_obj.load()),
+          leaf(g_cur_ps_obj.load()), g_last_draw_ibvb.load(std::memory_order_relaxed), blend,
+          colctl, REX_LOAD_U32(p2100 + 4 * 4), tex, c[0][0], c[0][1], c[0][2], c[0][3], c[1][0],
+          c[1][1], c[1][2], c[1][3], c[2][0], c[2][1], c[2][2], c[2][3], c[3][0], c[3][1],
+          c[3][2], c[3][3]);
+    }
+  }
   // DIAGNOSTIC pass census (removing the emulated GPU: which passes compose
   // what). Each distinct (viewport, VS, PS, 2D bracket) logs once with its
   // bound textures and the colour target's pitch. Per draw: a mutex, a set
@@ -7141,6 +7616,24 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
             g_sky_sun_have = true;
           }
         }
+      }
+    }
+  }
+  // base/transparent incandescent (signage): the PS's own c2.x (the
+  // exposure inside its tone curve, ucode 6/8) and c3.y (the material
+  // multiplier on D^2, ucode 4), per piece by its buffers. Both shaders
+  // share that register layout (identical ucode up to the alpha out).
+  if (const uint32_t ps_bank = g_ps_bank.load(std::memory_order_relaxed);
+      func == 0 && flags2d == 0 && ps_bank != 0 &&
+      (ShaderNameFlags(base, g_cur_ps_obj.load(std::memory_order_relaxed)) &
+                       kSnIncand) != 0) {
+    const float expo = LoadGuestF32(base, ps_bank + 8 * 4);   // PS c2.x
+    const float mult = LoadGuestF32(base, ps_bank + 13 * 4);  // PS c3.y
+    const uint64_t key = g_last_draw_ibvb.load(std::memory_order_relaxed);
+    if (key != 0 && expo > 0.0f && expo < 64.0f && mult >= 0.0f && mult <= 64.0f) {
+      std::lock_guard<std::mutex> lock(g_palette_mutex);
+      if (g_frame_incand.size() < 4096) {
+        g_frame_incand[key] = {expo, mult};
       }
     }
   }
@@ -12075,13 +12568,266 @@ void InterpolateDynamicItems(uint8_t* base, FrameScene& scene, double now) {
 // return; menu and empty frames still carry 2D). The inline-ring vertex
 // payloads are complete by frame end; convert them to little-endian and
 // expand quad lists into triangle lists so the render side stays trivial.
+// Reads one captured 2D draw's vertex payload from guest memory and normalizes
+// it to the renderer's 28-byte {float4 pos, float2 uv, u32 rgba} layout as a
+// triangle list (or strip), filling d.verts. Shared by the screen overlay
+// (Publish2dDraws) and the create-a-skater photo layers (BuildPhotoJob).
+// False: payload unreadable or a layout / topology the replay does not take.
+bool Normalize2dDraw(uint8_t* base, Draw2d& d) {
+  static thread_local std::vector<uint8_t> scratch_2d;
+  const uint32_t bytes = d.count * d.stride;
+  scratch_2d.resize(bytes);
+  if (!GuestTryCopy(scratch_2d.data(), base + d.addr, bytes)) {
+    return false;
+  }
+  // Guest dwords are big-endian.
+  for (size_t i = 0; i + 4 <= scratch_2d.size(); i += 4) {
+    uint32_t v;
+    std::memcpy(&v, scratch_2d.data() + i, 4);
+    v = BSwap32(v);
+    std::memcpy(scratch_2d.data() + i, &v, 4);
+  }
+  // Verified capture-side vertex layouts, all normalized to one 28-byte
+  // renderer layout {float4 pos, float2 uv, u32 rgba}:
+  //   24-byte {float4 pos, float2 uv}          - APT elements
+  //   20-byte {float3 pos, float2 uv}          - glyph text (bit 4)
+  //   20-byte {float4 pos, u32 color}          - SimpleDraw untextured
+  //   28-byte {float4 pos, u32 color, float2 uv} - SimpleDraw textured
+  //   16-byte {float4 pos}                     - SimpleDraw solid fill
+  //     (color rides in VS c8 = m[8]; the popup panel strips, Rewards
+  //     title bar / teal body / tan footer, are these)
+  //   32-byte {float4 pos, float4 color}       - SimpleDraw float-colour
+  //     quads (QuadListColoured: DrawParameters::Draw writes the position
+  //     vector's 4 words then the colour vector's; the challenge-start
+  //     screen fade, sub_827FEFD0, is a fullscreen one of these)
+  // (SimpleDraw = bit 5; its DrawParameters ctor orders colours before
+  // texcoords.)
+  // Identify which bitmap font a text batch draws from, ONCE per batch
+  // (not per vertex): the quads' uvs ARE the .bmpFont's glyph cells
+  // normalised, so the first quad's rect pins the font down. Guest atlas
+  // addresses move between runs and the four futura atlases are all
+  // 512x512, so neither address nor size could do it. The cell rects are
+  // unique across the embedded fonts (the generator asserts it) but NOT
+  // across the game's others, so a cell match is confirmed against the
+  // guest atlas's payload sum below. The renderer then serves the
+  // higher-resolution replacement for exactly this draw, and anything
+  // unmatched keeps the game's own texture.
+  if ((d.flags & 0x10u) != 0 && d.stride == 20 && d.count >= 4) {
+    // Memoised per atlas, direct-mapped on the fetch words the resolver
+    // keys on anyway: the match walks every cell of every font, which is
+    // fine once per atlas but not once per batch.
+    struct FontMemo {
+      uint32_t w0, w1;
+      int32_t id;
+      bool set;
+    };
+    // Indexed by the atlas ADDRESS (fetch word 1 bits 12+). The low bits
+    // are format/endian, the same for every font atlas: indexing on them
+    // put all fonts in one slot, and two fonts in a frame re-summed a
+    // whole atlas payload from guest memory per text batch.
+    static thread_local FontMemo memo[64];
+    FontMemo& m = memo[((d.fetch[1] >> 12) * 0x9E3779B1u) >> 26];
+    if (m.set && m.w0 == d.fetch[0] && m.w1 == d.fetch[1]) {
+      d.font_id = m.id;
+    } else {
+      // scratch_2d is already dword-byteswapped above, so the uv floats
+      // read native-endian here.
+      float u0 = 1e9f, v0 = 1e9f, u1 = -1e9f, v1 = -1e9f;
+      for (uint32_t k = 0; k < 4; ++k) {
+        const uint8_t* q = scratch_2d.data() + size_t(k) * d.stride;
+        float uu = 0.0f;
+        float vv = 0.0f;
+        std::memcpy(&uu, q + 12, 4);
+        std::memcpy(&vv, q + 16, 4);
+        u0 = std::min(u0, uu);
+        u1 = std::max(u1, uu);
+        v0 = std::min(v0, vv);
+        v1 = std::max(v1, vv);
+      }
+      // Only a real cell decides, and only a real cell is remembered: a
+      // degenerate quad (the game emits one per space) would otherwise
+      // memoise "no font" for an atlas that does have one.
+      if (u1 > u0 && v1 > v0) {
+        int id = MatchFontAtlas(u0, v0, u1, v1);
+        // The cell only names a CANDIDATE: futuraglow reuses
+        // futuraheavy's layout (166 shared cells), and the glow pass
+        // served the crisp white heavy replacement drew a second hard
+        // glyph where the game draws a soft pale-blue halo -- the
+        // "whiter, sharper" native text. Confirm against the guest
+        // atlas's own bytes: their sum is unaffected by tiling and endian
+        // swaps, and separates every font that shares cells.
+        if (id >= 0) {
+          const uint32_t size = FontAtlasPayloadSize(id);
+          static thread_local std::vector<uint8_t> payload;
+          payload.resize(size);
+          const uint32_t addr = 0xA0000000u | (d.fetch[1] & 0xFFFFF000u);
+          uint64_t sum = 0;
+          const bool read =
+              size != 0 && GuestTryCopy(payload.data(), base + addr, size);
+          if (read) {
+            for (uint8_t b : payload) {
+              sum += b;
+            }
+          }
+          const bool ok = read && FontAtlasPayloadMatches(id, sum);
+          static std::atomic<uint32_t> s_font_logs{0};
+          if (s_font_logs.fetch_add(1, std::memory_order_relaxed) < 32) {
+            REXLOG_INFO(
+                "native-scene: font atlas {:08x} cells match '{}', payload "
+                "sum {} -> {}",
+                addr, FontAtlasName(id), read ? int64_t(sum) : int64_t(-1),
+                ok ? "replaced" : "kept the game's atlas");
+          }
+          if (!ok) {
+            id = -1;
+          }
+        }
+        d.font_id = id;
+        m = {d.fetch[0], d.fetch[1], d.font_id, true};
+      }
+    }
+  }
+  {
+    static thread_local std::vector<uint8_t> norm_2d;
+    norm_2d.resize(size_t(d.count) * 28);
+    const float one = 1.0f;
+    const float zero = 0.0f;
+    const uint32_t white = 0xFFFFFFFFu;
+    const bool font = (d.flags & 0x10u) != 0;
+    const bool simple = (d.flags & 0x20u) != 0;
+    bool ok = true;
+    for (uint32_t v = 0; v < d.count && ok; ++v) {
+      uint8_t* dst = norm_2d.data() + size_t(v) * 28;
+      const uint8_t* src = scratch_2d.data() + size_t(v) * d.stride;
+      // Unbracketed captures (d.flags == 0, native loading/boot frames)
+      // take the SimpleDraw layout readings for 16/28: EA's inline-quad
+      // helpers order color before texcoords everywhere.
+      if (d.stride == 16 && (simple || d.flags == 0)) {  // pos4, untextured
+        std::memcpy(dst, src, 16);
+        std::memcpy(dst + 16, &zero, 4);
+        std::memcpy(dst + 20, &zero, 4);
+        std::memcpy(dst + 24, &white, 4);
+      } else if (d.stride == 24) {  // APT: pos4 + uv (with or without the
+        // SimpleDraw bracket; the compass needle/icons are 24-byte
+        // quads issued through SimpleDraw::Draw inside the HUD pass,
+        // same simpledraw_SimpleDrawUVSC shader as plain APT elements;
+        // requiring !simple here dropped them, a regression from adding
+        // bracket bit 5)
+        std::memcpy(dst, src, 24);
+        std::memcpy(dst + 24, &white, 4);
+      } else if (d.stride == 20 && font) {  // glyphs: pos3 + uv
+        std::memcpy(dst, src, 12);
+        std::memcpy(dst + 12, &one, 4);
+        std::memcpy(dst + 16, src + 12, 8);
+        std::memcpy(dst + 24, &white, 4);
+      } else if (d.stride == 20 && simple) {  // SimpleDraw: pos4 + color
+        std::memcpy(dst, src, 16);
+        std::memcpy(dst + 16, &zero, 4);
+        std::memcpy(dst + 20, &zero, 4);
+        // The dword byteswap reversed the color's guest byte order
+        // (r,g,b,a); restore it for R8G8B8A8_UNORM.
+        dst[24] = src[19];
+        dst[25] = src[18];
+        dst[26] = src[17];
+        dst[27] = src[16];
+      } else if (d.stride == 32 && simple) {  // pos4 + float4 color
+        std::memcpy(dst, src, 16);
+        std::memcpy(dst + 16, &zero, 4);
+        std::memcpy(dst + 20, &zero, 4);
+        for (int c = 0; c < 4; ++c) {
+          float f;
+          std::memcpy(&f, src + 16 + c * 4, 4);
+          f = std::clamp(f, 0.0f, 1.0f);
+          dst[24 + c] = uint8_t(f * 255.0f + 0.5f);
+        }
+      } else if (d.stride == 28 && (simple || d.flags == 0)) {  // pos4+color+uv
+        std::memcpy(dst, src, 16);
+        std::memcpy(dst + 16, src + 20, 8);
+        dst[24] = src[19];
+        dst[25] = src[18];
+        dst[26] = src[17];
+        dst[27] = src[16];
+      } else {
+        ok = false;
+      }
+    }
+    if (!ok) {
+      g_draws_2d_other.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    if (d.stride == 16 || d.stride == 32) {
+      // Untextured fill: the captured fetch words are leftover state from
+      // the previous textured draw; zero them so the replay binds the
+      // white texture instead of tinting the fill with a stale texel.
+      std::memset(d.fetch, 0, sizeof(d.fetch));
+    }
+    scratch_2d = norm_2d;
+    d.src_stride = d.stride;
+    d.stride = 28;
+  }
+  if (d.prim == 13 && d.count % 4 == 0) {
+    // Quad list -> triangle list (v0,v1,v2)(v0,v2,v3).
+    const uint32_t quads = d.count / 4;
+    d.verts.resize(size_t(quads) * 6 * d.stride);
+    static constexpr uint32_t kOrder[6] = {0, 1, 2, 0, 2, 3};
+    for (uint32_t q = 0; q < quads; ++q) {
+      for (uint32_t t = 0; t < 6; ++t) {
+        std::memcpy(d.verts.data() + (size_t(q) * 6 + t) * d.stride,
+                    scratch_2d.data() + (size_t(q) * 4 + kOrder[t]) * d.stride,
+                    d.stride);
+      }
+    }
+    d.prim = 4;
+    d.count = quads * 6;
+  } else if (d.prim == 6 && d.count >= 3) {
+    // Triangle STRIP -> triangle list, odd triangles winding-flipped:
+    // (v0,v1,v2) (v2,v1,v3) (v2,v3,v4) ...
+    //
+    // sk83_na_m is a debug build and its debug overlay draws each menu row's
+    // background box as a 4-vertex strip. Retail's UI never used this
+    // topology on the 2D path, so it fell through to the bare `continue`
+    // below and every box was discarded before reaching the renderer -- the
+    // text drew, the boxes behind it did not.
+    //
+    // Expanded here rather than passed through because the replay's topology
+    // map only special-cases prim 5; a 6 arriving there would draw as a
+    // list. Treating it as a FAN instead ((v0,vi,vi+1)) puts the second
+    // triangle on the wrong corner and each box renders with a diagonal
+    // wedge missing from one side.
+    const uint32_t tris = d.count - 2;
+    d.verts.resize(size_t(tris) * 3 * d.stride);
+    for (uint32_t t = 0; t < tris; ++t) {
+      uint32_t idx[3];
+      if ((t & 1u) != 0) {
+        idx[0] = t + 1;
+        idx[1] = t;
+        idx[2] = t + 2;
+      } else {
+        idx[0] = t;
+        idx[1] = t + 1;
+        idx[2] = t + 2;
+      }
+      for (uint32_t k = 0; k < 3; ++k) {
+        std::memcpy(d.verts.data() + (size_t(t) * 3 + k) * d.stride,
+                    scratch_2d.data() + size_t(idx[k]) * d.stride, d.stride);
+      }
+    }
+    d.prim = 4;
+    d.count = tris * 3;
+  } else if (d.prim == 4 || d.prim == 5) {
+    d.verts.assign(scratch_2d.begin(), scratch_2d.end());
+  } else {
+    return false;
+  }
+  return true;
+}
+
 void Publish2dDraws(uint8_t* base) {
   std::vector<Draw2d> frame_2d;
   {
     std::lock_guard<std::mutex> lock(g_2d_mutex);
     frame_2d.swap(g_frame_2d);
   }
-  static thread_local std::vector<uint8_t> scratch_2d;
   std::vector<Draw2d> published;
   published.reserve(frame_2d.size());
   for (Draw2d& d : frame_2d) {
@@ -12118,248 +12864,7 @@ void Publish2dDraws(uint8_t* base) {
       g_draws_2d_dropped.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
-    const uint32_t bytes = d.count * d.stride;
-    scratch_2d.resize(bytes);
-    if (!GuestTryCopy(scratch_2d.data(), base + d.addr, bytes)) {
-      continue;
-    }
-    // Guest dwords are big-endian.
-    for (size_t i = 0; i + 4 <= scratch_2d.size(); i += 4) {
-      uint32_t v;
-      std::memcpy(&v, scratch_2d.data() + i, 4);
-      v = BSwap32(v);
-      std::memcpy(scratch_2d.data() + i, &v, 4);
-    }
-    // Verified capture-side vertex layouts, all normalized to one 28-byte
-    // renderer layout {float4 pos, float2 uv, u32 rgba}:
-    //   24-byte {float4 pos, float2 uv}          - APT elements
-    //   20-byte {float3 pos, float2 uv}          - glyph text (bit 4)
-    //   20-byte {float4 pos, u32 color}          - SimpleDraw untextured
-    //   28-byte {float4 pos, u32 color, float2 uv} - SimpleDraw textured
-    //   16-byte {float4 pos}                     - SimpleDraw solid fill
-    //     (color rides in VS c8 = m[8]; the popup panel strips, Rewards
-    //     title bar / teal body / tan footer, are these)
-    //   32-byte {float4 pos, float4 color}       - SimpleDraw float-colour
-    //     quads (QuadListColoured: DrawParameters::Draw writes the position
-    //     vector's 4 words then the colour vector's; the challenge-start
-    //     screen fade, sub_827FEFD0, is a fullscreen one of these)
-    // (SimpleDraw = bit 5; its DrawParameters ctor orders colours before
-    // texcoords.)
-    // Identify which bitmap font a text batch draws from, ONCE per batch
-    // (not per vertex): the quads' uvs ARE the .bmpFont's glyph cells
-    // normalised, so the first quad's rect pins the font down. Guest atlas
-    // addresses move between runs and the four futura atlases are all
-    // 512x512, so neither address nor size could do it. The cell rects are
-    // unique across the embedded fonts (the generator asserts it) but NOT
-    // across the game's others, so a cell match is confirmed against the
-    // guest atlas's payload sum below. The renderer then serves the
-    // higher-resolution replacement for exactly this draw, and anything
-    // unmatched keeps the game's own texture.
-    if ((d.flags & 0x10u) != 0 && d.stride == 20 && d.count >= 4) {
-      // Memoised per atlas, direct-mapped on the fetch words the resolver
-      // keys on anyway: the match walks every cell of every font, which is
-      // fine once per atlas but not once per batch.
-      struct FontMemo {
-        uint32_t w0, w1;
-        int32_t id;
-        bool set;
-      };
-      // Indexed by the atlas ADDRESS (fetch word 1 bits 12+). The low bits
-      // are format/endian, the same for every font atlas: indexing on them
-      // put all fonts in one slot, and two fonts in a frame re-summed a
-      // whole atlas payload from guest memory per text batch.
-      static thread_local FontMemo memo[64];
-      FontMemo& m = memo[((d.fetch[1] >> 12) * 0x9E3779B1u) >> 26];
-      if (m.set && m.w0 == d.fetch[0] && m.w1 == d.fetch[1]) {
-        d.font_id = m.id;
-      } else {
-        // scratch_2d is already dword-byteswapped above, so the uv floats
-        // read native-endian here.
-        float u0 = 1e9f, v0 = 1e9f, u1 = -1e9f, v1 = -1e9f;
-        for (uint32_t k = 0; k < 4; ++k) {
-          const uint8_t* q = scratch_2d.data() + size_t(k) * d.stride;
-          float uu = 0.0f;
-          float vv = 0.0f;
-          std::memcpy(&uu, q + 12, 4);
-          std::memcpy(&vv, q + 16, 4);
-          u0 = std::min(u0, uu);
-          u1 = std::max(u1, uu);
-          v0 = std::min(v0, vv);
-          v1 = std::max(v1, vv);
-        }
-        // Only a real cell decides, and only a real cell is remembered: a
-        // degenerate quad (the game emits one per space) would otherwise
-        // memoise "no font" for an atlas that does have one.
-        if (u1 > u0 && v1 > v0) {
-          int id = MatchFontAtlas(u0, v0, u1, v1);
-          // The cell only names a CANDIDATE: futuraglow reuses
-          // futuraheavy's layout (166 shared cells), and the glow pass
-          // served the crisp white heavy replacement drew a second hard
-          // glyph where the game draws a soft pale-blue halo -- the
-          // "whiter, sharper" native text. Confirm against the guest
-          // atlas's own bytes: their sum is unaffected by tiling and endian
-          // swaps, and separates every font that shares cells.
-          if (id >= 0) {
-            const uint32_t size = FontAtlasPayloadSize(id);
-            static thread_local std::vector<uint8_t> payload;
-            payload.resize(size);
-            const uint32_t addr = 0xA0000000u | (d.fetch[1] & 0xFFFFF000u);
-            uint64_t sum = 0;
-            const bool read =
-                size != 0 && GuestTryCopy(payload.data(), base + addr, size);
-            if (read) {
-              for (uint8_t b : payload) {
-                sum += b;
-              }
-            }
-            const bool ok = read && FontAtlasPayloadMatches(id, sum);
-            static std::atomic<uint32_t> s_font_logs{0};
-            if (s_font_logs.fetch_add(1, std::memory_order_relaxed) < 32) {
-              REXLOG_INFO(
-                  "native-scene: font atlas {:08x} cells match '{}', payload "
-                  "sum {} -> {}",
-                  addr, FontAtlasName(id), read ? int64_t(sum) : int64_t(-1),
-                  ok ? "replaced" : "kept the game's atlas");
-            }
-            if (!ok) {
-              id = -1;
-            }
-          }
-          d.font_id = id;
-          m = {d.fetch[0], d.fetch[1], d.font_id, true};
-        }
-      }
-    }
-    {
-      static thread_local std::vector<uint8_t> norm_2d;
-      norm_2d.resize(size_t(d.count) * 28);
-      const float one = 1.0f;
-      const float zero = 0.0f;
-      const uint32_t white = 0xFFFFFFFFu;
-      const bool font = (d.flags & 0x10u) != 0;
-      const bool simple = (d.flags & 0x20u) != 0;
-      bool ok = true;
-      for (uint32_t v = 0; v < d.count && ok; ++v) {
-        uint8_t* dst = norm_2d.data() + size_t(v) * 28;
-        const uint8_t* src = scratch_2d.data() + size_t(v) * d.stride;
-        // Unbracketed captures (d.flags == 0, native loading/boot frames)
-        // take the SimpleDraw layout readings for 16/28: EA's inline-quad
-        // helpers order color before texcoords everywhere.
-        if (d.stride == 16 && (simple || d.flags == 0)) {  // pos4, untextured
-          std::memcpy(dst, src, 16);
-          std::memcpy(dst + 16, &zero, 4);
-          std::memcpy(dst + 20, &zero, 4);
-          std::memcpy(dst + 24, &white, 4);
-        } else if (d.stride == 24) {  // APT: pos4 + uv (with or without the
-          // SimpleDraw bracket; the compass needle/icons are 24-byte
-          // quads issued through SimpleDraw::Draw inside the HUD pass,
-          // same simpledraw_SimpleDrawUVSC shader as plain APT elements;
-          // requiring !simple here dropped them, a regression from adding
-          // bracket bit 5)
-          std::memcpy(dst, src, 24);
-          std::memcpy(dst + 24, &white, 4);
-        } else if (d.stride == 20 && font) {  // glyphs: pos3 + uv
-          std::memcpy(dst, src, 12);
-          std::memcpy(dst + 12, &one, 4);
-          std::memcpy(dst + 16, src + 12, 8);
-          std::memcpy(dst + 24, &white, 4);
-        } else if (d.stride == 20 && simple) {  // SimpleDraw: pos4 + color
-          std::memcpy(dst, src, 16);
-          std::memcpy(dst + 16, &zero, 4);
-          std::memcpy(dst + 20, &zero, 4);
-          // The dword byteswap reversed the color's guest byte order
-          // (r,g,b,a); restore it for R8G8B8A8_UNORM.
-          dst[24] = src[19];
-          dst[25] = src[18];
-          dst[26] = src[17];
-          dst[27] = src[16];
-        } else if (d.stride == 32 && simple) {  // pos4 + float4 color
-          std::memcpy(dst, src, 16);
-          std::memcpy(dst + 16, &zero, 4);
-          std::memcpy(dst + 20, &zero, 4);
-          for (int c = 0; c < 4; ++c) {
-            float f;
-            std::memcpy(&f, src + 16 + c * 4, 4);
-            f = std::clamp(f, 0.0f, 1.0f);
-            dst[24 + c] = uint8_t(f * 255.0f + 0.5f);
-          }
-        } else if (d.stride == 28 && (simple || d.flags == 0)) {  // pos4+color+uv
-          std::memcpy(dst, src, 16);
-          std::memcpy(dst + 16, src + 20, 8);
-          dst[24] = src[19];
-          dst[25] = src[18];
-          dst[26] = src[17];
-          dst[27] = src[16];
-        } else {
-          ok = false;
-        }
-      }
-      if (!ok) {
-        g_draws_2d_other.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-      if (d.stride == 16 || d.stride == 32) {
-        // Untextured fill: the captured fetch words are leftover state from
-        // the previous textured draw; zero them so the replay binds the
-        // white texture instead of tinting the fill with a stale texel.
-        std::memset(d.fetch, 0, sizeof(d.fetch));
-      }
-      scratch_2d = norm_2d;
-      d.src_stride = d.stride;
-      d.stride = 28;
-    }
-    if (d.prim == 13 && d.count % 4 == 0) {
-      // Quad list -> triangle list (v0,v1,v2)(v0,v2,v3).
-      const uint32_t quads = d.count / 4;
-      d.verts.resize(size_t(quads) * 6 * d.stride);
-      static constexpr uint32_t kOrder[6] = {0, 1, 2, 0, 2, 3};
-      for (uint32_t q = 0; q < quads; ++q) {
-        for (uint32_t t = 0; t < 6; ++t) {
-          std::memcpy(d.verts.data() + (size_t(q) * 6 + t) * d.stride,
-                      scratch_2d.data() + (size_t(q) * 4 + kOrder[t]) * d.stride,
-                      d.stride);
-        }
-      }
-      d.prim = 4;
-      d.count = quads * 6;
-    } else if (d.prim == 6 && d.count >= 3) {
-      // Triangle STRIP -> triangle list, odd triangles winding-flipped:
-      // (v0,v1,v2) (v2,v1,v3) (v2,v3,v4) ...
-      //
-      // sk83_na_m is a debug build and its debug overlay draws each menu row's
-      // background box as a 4-vertex strip. Retail's UI never used this
-      // topology on the 2D path, so it fell through to the bare `continue`
-      // below and every box was discarded before reaching the renderer -- the
-      // text drew, the boxes behind it did not.
-      //
-      // Expanded here rather than passed through because the replay's topology
-      // map only special-cases prim 5; a 6 arriving there would draw as a
-      // list. Treating it as a FAN instead ((v0,vi,vi+1)) puts the second
-      // triangle on the wrong corner and each box renders with a diagonal
-      // wedge missing from one side.
-      const uint32_t tris = d.count - 2;
-      d.verts.resize(size_t(tris) * 3 * d.stride);
-      for (uint32_t t = 0; t < tris; ++t) {
-        uint32_t idx[3];
-        if ((t & 1u) != 0) {
-          idx[0] = t + 1;
-          idx[1] = t;
-          idx[2] = t + 2;
-        } else {
-          idx[0] = t;
-          idx[1] = t + 1;
-          idx[2] = t + 2;
-        }
-        for (uint32_t k = 0; k < 3; ++k) {
-          std::memcpy(d.verts.data() + (size_t(t) * 3 + k) * d.stride,
-                      scratch_2d.data() + size_t(idx[k]) * d.stride, d.stride);
-        }
-      }
-      d.prim = 4;
-      d.count = tris * 3;
-    } else if (d.prim == 4 || d.prim == 5) {
-      d.verts.assign(scratch_2d.begin(), scratch_2d.end());
-    } else {
+    if (!Normalize2dDraw(base, d)) {
       continue;
     }
     // BIG-QUAD TRACER (reported symptom: an unrelated "mongo poster" texture
@@ -13161,6 +13666,7 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
   std::unordered_map<uint64_t, FaceInjury> face_injury;
   std::unordered_map<uint64_t, CharLayer> char_layer;
   std::unordered_map<uint64_t, SkinSssRecord> skin_sss;
+  std::unordered_map<uint64_t, std::array<float, 2>> incand;
   FlatSet<uint64_t> ws_keys;
   std::unordered_map<uint64_t, std::vector<DrawEntry>> ws_entries;
   uint32_t ws_draws = 0;
@@ -13195,6 +13701,7 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
     face_injury.swap(g_frame_face_injury);
     char_layer.swap(g_frame_char_layer);
     skin_sss.swap(g_frame_skin_sss);
+    incand.swap(g_frame_incand);
     ws_keys.swap(g_frame_ws_keys);
     ws_entries.swap(g_frame_ws_entries);
     g_frame_ws_entries.clear();
@@ -13821,6 +14328,29 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
             item.face_inj_amount = fi.amount;
             item.face_inj_valid = true;
           }
+        }
+      }
+    }
+    // Incandescent PS constants (see DrawItem::incand_expo): material
+    // properties, held across frames that miss the draw.
+    {
+      static std::unordered_map<uint64_t, std::pair<std::array<float, 2>, uint64_t>> s_incand;
+      static uint64_t s_in_frame = 0;
+      ++s_in_frame;
+      if (s_incand.size() > 4096) {
+        s_incand.clear();
+      }
+      for (const auto& [k, v] : incand) {
+        s_incand[k] = {v, s_in_frame};
+      }
+      for (DrawItem& item : scene.items) {
+        if (item.env_family != 12 && item.env_family != 18) {
+          continue;
+        }
+        const auto it = s_incand.find((uint64_t(item.ib_obj) << 32) | item.vb_obj);
+        if (it != s_incand.end() && s_in_frame - it->second.second <= 600) {
+          item.incand_expo = it->second.first[0];
+          item.incand_mult = it->second.first[1];
         }
       }
     }
@@ -15878,6 +16408,10 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
     if (g_tree_anim_have) {
       std::memcpy(scene.tree_anim_rows, g_tree_anim_rows, sizeof(g_tree_anim_rows));
       scene.tree_anim_valid = true;
+    }
+    if (g_flag_anim_have) {
+      std::memcpy(scene.flag_anim_rows, g_flag_anim_rows, sizeof(g_flag_anim_rows));
+      scene.flag_anim_valid = true;
     }
   }
   for (int m = 0; m < 2; ++m) {

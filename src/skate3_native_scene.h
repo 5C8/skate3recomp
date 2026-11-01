@@ -210,6 +210,12 @@ struct DrawItem {
   // game bound a texture there other than the `decal` channel's object
   // (e.g. event-ad art over a decal section).
   uint32_t decal_fetch[6] = {};
+  // base/transparent incandescent (fams 12 / 18): the draw's own PS c2.x
+  // (exposure inside its tone curve) and c3.y (material multiplier on D^2),
+  // captured from the item's draw (g_frame_incand). 0 = not captured: the
+  // frame exposure and a multiplier of 1 stand in.
+  float incand_expo = 0.0f;
+  float incand_mult = 0.0f;
   // "macrooverlay" material channel (environment shaders): a large-scale
   // grime/crack overlay multiplied over the diffuse at uv *
   // macroOverlayUVScale with macroOverlayOpacity: the ground/wall
@@ -745,6 +751,10 @@ struct FrameScene {
   // game's own VS bank. Used only by animated.tree vertex deformation.
   bool tree_anim_valid = false;
   float tree_anim_rows[16] = {};
+  // vertexanimate_defaultVS c7..c10 + vertexanimate_defaultPS c0
+  // (animated.flag wave and lightmap scale); [19] = 1 once captured.
+  bool flag_anim_valid = false;
+  float flag_anim_rows[20] = {};
   // flowingwateralpha.fx (the water.flowing* materials) m_params rows,
   // captured once per frame from a flowingwateralpha PS bank (debug-path
   // classified): [0..3] = m_params[0] (PS c11: normal scale xzw + the
@@ -1056,16 +1066,32 @@ struct FrameScene {
 // PhotoEffects::GeneratePhoto -> Apply draws the skater with the photo
 // camera over a colour clear into the 1152x640 screenshot target and
 // resolves it; ExtractTextureImageData then CPU-reads and crops it.
+// The pass's 2D layers (see skate3_native_scene_state.h).
+struct PhotoLayers;
 struct PhotoJob {
   uint32_t dest_phys = 0;  // the resolve destination (physical)
   uint32_t dest_tex = 0;   // the guest texture object resolved into
   std::shared_ptr<const FrameScene> scene;
+  // The pass's own 2D composition around the skater (PhotoEffects layers:
+  // backdrop, colour bars, logos, the gamertag) and its raw colour clear.
+  std::shared_ptr<const PhotoLayers> layers;
   int64_t created_ms = 0;
 };
 // Command processor thread: take the queued job for this resolve.
 bool TakePhotoJob(uint32_t dest_phys, PhotoJob* out);
 // PhotoEffects::Apply scope (guest thread, from the hook layer).
 void OnPhotoApply(bool enter);
+// Snapshot trace (diagnostic, cvar skate3_native_render_photo_trace): a
+// window from the snapshot camera setup to the JPEG encode in which every
+// draw / clear / resolve and the hooked PhotoEffects calls are logged.
+void PhotoTraceBegin(const char* why);
+void PhotoTraceEnd(const char* why);
+bool PhotoTraceActive();
+// One hooked call: its argument registers, an optional record dump
+// (dump_len bytes at dump_ptr) and an optional texture object.
+void PhotoTraceCall(uint8_t* base, const char* label, uint32_t r3, uint32_t r4, uint32_t r5,
+                    uint32_t r6, uint32_t r7, uint32_t dump_ptr, uint32_t dump_len,
+                    uint32_t tex);
 
 // One frame submission record from the hook layer (see RenderMeshRecord).
 struct SubmitRecord {

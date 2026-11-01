@@ -853,13 +853,94 @@ SK83_PHOTO_MARK(rex_Sk8_CACPresEntity_SetupSnapshotCamera_AAAXXZ_829AB768,
 // Hor+ gameplay camera. The picture is an image of the game's fixed
 // 1152x640 raster, so its camera must be the console's: hold 16/9 here.
 extern "C" REX_FUNC(rex_Sk8_Audio_MusicSystem_GetNumSongsInPlayList_IAAIVaud_playlists_Gen_Attrib_Z_8278F788) {
+  skate3::native_scene::PhotoTraceBegin("snapshot camera 8278F788");
+  skate3::native_scene::PhotoTraceCall(base, "SnapshotCamera(8278F788)", ctx.r3.u32, ctx.r4.u32,
+                                       ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, 0, 0, 0);
   Skate3GuestAspectHold16x9(true);
   __imp__rex_Sk8_Audio_MusicSystem_GetNumSongsInPlayList_IAAIVaud_playlists_Gen_Attrib_Z_8278F788(ctx, base);
   Skate3GuestAspectHold16x9(false);
 }
 
+// ---- Snapshot trace hooks (retail addresses; see PhotoTraceBegin) ----
+// The retail PhotoEffects pipeline: 827E1F58 looks up a preset (827E46C8,
+// Attrib collection) and runs 827E2020, which draws the screenshot target
+// (827E3F60), lets every layer object fill its 60-byte record (vtable +4) and
+// draws it by type: 1 827E2E30, 2 827E2F68, 3 827E3E20, 4/6/7 827E41C0
+// (texture layer), 5 827E3070; then resolves and JPEG-encodes (827E2C48).
+extern "C" REX_FUNC(sub_827E1F58) {
+  skate3::native_scene::PhotoTraceBegin("PhotoEffects 827E1F58");
+  skate3::native_scene::PhotoTraceCall(base, "Generate(827E1F58)", ctx.r3.u32, ctx.r4.u32,
+                                       ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r4.u32, 32, 0);
+  __imp__sub_827E1F58(ctx, base);
+  skate3::native_scene::PhotoTraceCall(base, "Generate(827E1F58) ret", ctx.r3.u32, 0, 0, 0, 0,
+                                       0, 0, 0);
+}
+extern "C" REX_FUNC(sub_827E46C8) {
+  skate3::native_scene::PhotoTraceCall(base, "PresetLookup(827E46C8)", ctx.r3.u32, ctx.r4.u32,
+                                       ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r4.u32, 16, 0);
+  __imp__sub_827E46C8(ctx, base);
+  skate3::native_scene::PhotoTraceCall(base, "PresetLookup(827E46C8) ret", ctx.r3.u32, 0, 0,
+                                       0, 0, 0, 0, 0);
+}
+#define SKATE3_PHOTO_LAYER_HOOK(fn, label, desc_reg, tex_expr)                              \
+  extern "C" REX_FUNC(fn) {                                                                  \
+    skate3::native_scene::PhotoTraceCall(base, label, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,    \
+                                         ctx.r6.u32, ctx.r7.u32, ctx.desc_reg.u32, 60,       \
+                                         tex_expr);                                          \
+    __imp__##fn(ctx, base);                                                                  \
+  }
+SKATE3_PHOTO_LAYER_HOOK(sub_827E2E30, "Layer1(827E2E30)", r4, 0)
+SKATE3_PHOTO_LAYER_HOOK(sub_827E2F68, "Layer2(827E2F68)", r3, 0)
+SKATE3_PHOTO_LAYER_HOOK(sub_827E3E20, "Layer3(827E3E20)", r3, 0)
+SKATE3_PHOTO_LAYER_HOOK(sub_827E41C0, "Layer4/6/7 texture(827E41C0)", r4, ctx.r3.u32)
+SKATE3_PHOTO_LAYER_HOOK(sub_827E3070, "Layer5(827E3070)", r3, 0)
+#undef SKATE3_PHOTO_LAYER_HOOK
+// Snapshot trace: save the photo texture (k_8_8_8_8 1152x640) as a PPM in
+// logs/, tagged with the renderer mode, so the native and emulated results of
+// the same pass can be compared pixel for pixel.
+static void PhotoTraceDumpTexture(uint8_t* base, uint32_t texture, const char* stage) {
+  if (!skate3::native_scene::PhotoTraceActive() || texture < 0x10000) {
+    return;
+  }
+  static int s_dump = 0;
+  const std::string path =
+      fmt::format("logs/photo_trace_{:02}_{}_{}.ppm", s_dump++,
+                  skate3::native_scene::Enabled() ? "native" : "emulated", stage);
+  skate3::native_scene::DumpGuestTextureForDiag(base, texture, path.c_str());
+  REXLOG_INFO("native-scene: PHOTO-TRACE saved {} (texture {:08X})", path, texture);
+}
+
+extern "C" REX_FUNC(rex_Sk8_CACPresEntity_GenerateSnapShotJPEG_QAA_AVcAssetID_assman_XZ_827E2C48) {
+  PhotoTraceDumpTexture(base, ctx.r4.u32, "encoded");
+  uint32_t src_tex = 0;
+  if (ctx.r3.u32 >= 0x10000) {
+    src_tex = REX_LOAD_U32(ctx.r3.u32 + 0);
+  }
+  skate3::native_scene::PhotoTraceCall(base, "EncodeJPEG(827E2C48)", ctx.r3.u32, ctx.r4.u32,
+                                       ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r3.u32, 48,
+                                       src_tex);
+  __imp__rex_Sk8_CACPresEntity_GenerateSnapShotJPEG_QAA_AVcAssetID_assman_XZ_827E2C48(ctx, base);
+}
+
 // PhotoEffects::Apply (0x829AB318): the portrait pass scope (see PhotoJob).
 extern "C" REX_FUNC(sub_827E2020) {
+  skate3::native_scene::PhotoTraceBegin("PhotoEffects::Apply 827E2020");
+  // r4 = layer object array, r5 = layer count, r6 = output size (w, h).
+  skate3::native_scene::PhotoTraceCall(base, "Apply(827E2020) layers", ctx.r3.u32, ctx.r4.u32,
+                                       ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r4.u32,
+                                       std::min<uint32_t>(ctx.r5.u32, 32u) * 4u, 0);
+  skate3::native_scene::PhotoTraceCall(base, "Apply(827E2020) size", ctx.r3.u32, 0, 0, 0, 0,
+                                       ctx.r6.u32, 8, 0);
+  if (skate3::native_scene::PhotoTraceActive() && ctx.r4.u32 >= 0x10000) {
+    // Each layer object: vtable + its 60-byte record (+4), before the fill.
+    for (uint32_t i = 0; i < std::min<uint32_t>(ctx.r5.u32, 32u); ++i) {
+      const uint32_t layer = REX_LOAD_U32(ctx.r4.u32 + i * 4);
+      if (layer >= 0x10000) {
+        skate3::native_scene::PhotoTraceCall(base, "Apply layer obj", layer,
+                                             REX_LOAD_U32(layer + 0), i, 0, 0, layer + 4, 60, 0);
+      }
+    }
+  }
   const bool native = skate3::native_render::Enabled();
   if (native) {
     skate3::native_scene::RecordPassMarker("PhotoEffects::Apply(829AB318) enter", ctx.r3.u32,
@@ -874,6 +955,10 @@ extern "C" REX_FUNC(sub_827E2020) {
   }
 }
 extern "C" REX_FUNC(sub_827E3F60) {
+  skate3::native_scene::PhotoTraceCall(
+      base, "DrawTextureQuad(827E3F60)", ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32,
+      ctx.r7.u32, ctx.r3.u32, 48, ctx.r3.u32 >= 0x10000 ? REX_LOAD_U32(ctx.r3.u32 + 0) : 0);
+  PhotoTraceDumpTexture(base, ctx.r3.u32, "before");
   const bool mark = skate3::native_render::Enabled();
   if (mark) {
     skate3::native_scene::RecordPassMarker("PhotoEffects::DrawTextureQuad(8299EBE0) enter",

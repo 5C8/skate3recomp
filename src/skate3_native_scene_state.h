@@ -389,6 +389,10 @@ inline float g_family_rows[4] = {0.3435f, 0.02f, 1.0f, 0.45f};
 inline std::mutex g_tree_anim_mutex;
 inline float g_tree_anim_rows[16] = {};
 inline bool g_tree_anim_have = false;
+// vertexanimate_defaultVS c7..c10 + its PS c0 (animated.flag), under
+// g_tree_anim_mutex.
+inline float g_flag_anim_rows[20] = {};
+inline bool g_flag_anim_have = false;
 inline bool g_tree_frame_done = false;
 inline bool g_proxy_frame_done = false;
 // flowingwateralpha m_params + animation-time rows (see
@@ -605,6 +609,10 @@ struct CharLayer {
   uint32_t slot;
 };
 inline std::unordered_map<uint64_t, CharLayer> g_frame_char_layer;
+// (ib_obj << 32 | vb_obj) -> {PS c2.x exposure, PS c3.y material multiplier}
+// of the piece's base/transparent incandescent draw this frame (see
+// DrawItem::incand_expo).
+inline std::unordered_map<uint64_t, std::array<float, 2>> g_frame_incand;
 // (ib_obj << 32 | vb_obj) -> the CAS subsurface-scattering state of those
 // buffers this frame (cac_face_nisPS / cacstamp_skin_nisPS): unwrap = the
 // game drew the piece's texture-space lighting pass (*_unwrapPS, a 128x128
@@ -1078,6 +1086,18 @@ struct Draw2d {
   std::vector<uint8_t> verts;  // filled at frame end (little-endian dwords)
 };
 inline std::mutex g_2d_mutex;
+// The create-a-skater photo's 2D composition (see PhotoJob): the PhotoEffects
+// layers are bare SimpleDraw / font draws into the 1152x640 photo target, in
+// that target's own coordinate space. The skater is drawn between them: the
+// backdrop layer before it, colour bars / logos / the rotated gamertag after.
+struct PhotoLayers {
+  std::vector<Draw2d> pre;   // after the pass's colour clear, before the skater
+  std::vector<Draw2d> post;  // after the skater
+  float clear[4] = {};       // the colour clear, as the game's raw 8-bit value
+  bool clear_valid = false;
+};
+// Reads a captured draw's vertex payload and normalizes it for the replay.
+bool Normalize2dDraw(uint8_t* base, Draw2d& d);
 inline std::vector<Draw2d> g_frame_2d;  // capture in submission order
 inline std::vector<Draw2d> g_scene_2d;  // published at frame end
 inline uint64_t g_scene_2d_generation = 0;
