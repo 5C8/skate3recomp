@@ -53,10 +53,10 @@ See the [SteamVR setup guide](docs/FEATURES.md#steamvr) for the full steps.
 
 ## Online server
 
-5C8's community Blaze server: **`129.151.200.180`**.
+5C8's community Blaze server: **`comebacktonewsanvan.com`**.
 
 Open **Settings (Escape/F1) → Online → Server Address**, enter
-`129.151.200.180`, and press **Enter** to save. Then connect through the game's
+`comebacktonewsanvan.com`, and press **Enter** to save. Then connect through the game's
 online menus. The server supports both projects; use the same game build as
 the other players when joining a session.
 

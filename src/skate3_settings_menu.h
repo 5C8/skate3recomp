@@ -41,6 +41,14 @@ void CaptureSettingsBootValues();
 // (the caller then closes this one). False if the launch failed.
 bool RelaunchGame();
 
+// Points every host in `hosts` (SettingsMenuEnv::server_hosts) at the server
+// address when the config left some of them on an old target (configs written
+// before a host joined the list, or edited by hand), and saves the change to
+// `config_path`. Call once at startup (OnPostSetup): the menu itself is only
+// built when first opened, which is too late for the first connection.
+void SyncServerHostOverrides(const std::vector<std::string>& hosts,
+                             const std::filesystem::path& config_path);
+
 // Build-specific inputs (the menu source is shared by sk83_na_m and
 // skate3recomp; keep the two copies identical).
 struct SettingsMenuEnv {

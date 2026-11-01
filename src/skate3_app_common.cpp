@@ -116,6 +116,17 @@ REXCVAR_DEFINE_DOUBLE(skate3_ultrawide_target_aspect, 0.0, "Skate 3",
 
 namespace {
 
+// Hosts the Server Address setting points at the custom server. skate3_web is the
+// EAWebKit pages' host (skate.Feed, leaderboards, teams); it has no real DNS entry, so
+// unmapped the pages never load. 10.10.237.194 is the web tier's IPv4 literal (no DNS
+// lookup; see skate3_online.cpp __imp__NetDll_connect). Left unmapped, the
+// connect-time uploads behind "Updating Reports" each wait out a 5 s connect timeout
+// per retry.
+std::vector<std::string> OnlineServerHosts() {
+  return {"gosredirector.ea.com", "downloads.skate.online.ea.com", "skate3_web",
+          "10.10.237.194"};
+}
+
 void ApplyDemoPathProfileOverride() {
   // A logging-only probe must preserve the selected profile. Only explicit
   // automation may request the signed-out boot used by scripted runs.
@@ -790,6 +801,7 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
 
 void Skate3BaseApp::OnPostSetup() {
   skate3::shader_disasm::RunIfRequested();
+  skate3::SyncServerHostOverrides(OnlineServerHosts(), user_settings_path_);
   ApplySelectedProfileToRuntime();
   ApplyGameplayCursorMode();
 
@@ -967,7 +979,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     return pad;
   };
   skate3::SettingsMenuEnv env;
-  env.server_hosts = {"gosredirector.ea.com", "downloads.skate.online.ea.com"};
+  env.server_hosts = OnlineServerHosts();
   env.profiles_path = profiles_path_;
   env.is_fullscreen = [this] { return window() && window()->IsFullscreen(); };
   env.set_fullscreen = [this](bool on) {

@@ -61,8 +61,8 @@ and gamertag. After changing the server, restart when requested and sign in,
 then use the game's online/session menus. The server must support the particular
 retail or milestone build; simply selecting the same hostname does not guarantee
 cross-build matchmaking. Test with both players on the same build first.
-5C8's community Blaze server address is **`129.151.200.180`**. Open
-**Settings (Escape/F1) → Online → Server Address**, enter `129.151.200.180`,
+5C8's community Blaze server is **`comebacktonewsanvan.com`**. Open
+**Settings (Escape/F1) → Online → Server Address**, enter `comebacktonewsanvan.com`,
 and press **Enter** to save. The change applies to the next connection. This
 server supports both projects; players joining the same session should use
 the same game build.
