@@ -87,7 +87,7 @@ std::atomic<uint32_t> g_presentation{0};  // SkaterPresentation, from GetDeckMat
 uint32_t ReadGuestU32(uint8_t* base, uint32_t addr) {
   uint32_t v;
   std::memcpy(&v, REX_RAW_ADDR(addr), 4);
-  return _byteswap_ulong(v);
+  return __builtin_bswap32(v);
 }
 
 uint32_t SkaterOwner(uint8_t* base, uint32_t presentation, uint32_t index) {

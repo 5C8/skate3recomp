@@ -825,7 +825,7 @@ uint64_t MeshLayoutKey(const DrawItem& item) {
   // resident decode made under the old rule is never rebuilt. decal2 too:
   // it moves the extra element from slot 12/13 to the layer-2 word; and the
   // trafficlight layout (lit/unlit uv + lamp index).
-  for (uint64_t v : {item.ropa ? 0ull : uint64_t(item.vb_obj), uint64_t(item.ib_obj),
+  for (uint64_t v : {item.ropa ? uint64_t(0) : uint64_t(item.vb_obj), uint64_t(item.ib_obj),
                      uint64_t(item.vb_bytes), uint64_t(item.ib_count), uint64_t(item.stride),
                      uint64_t(item.uv3_fmt), uint64_t(item.uv3_offset),
                      uint64_t(item.decal2), uint64_t(item.env_family == 17)}) {
@@ -10537,6 +10537,7 @@ double InterFramePresentAt(void* /*user_data*/) { return g_inter.present_at; }
 // The presented-rate target (Hz): the override cvar, else the refresh rate of
 // the monitor the game window is on, re-read every 2 s (window moves, mode
 // changes).
+#if defined(_WIN32)
 BOOL CALLBACK InterFrameFindOwnWindow(HWND wnd, LPARAM out) {
   DWORD pid = 0;
   GetWindowThreadProcessId(wnd, &pid);
@@ -10546,6 +10547,7 @@ BOOL CALLBACK InterFrameFindOwnWindow(HWND wnd, LPARAM out) {
   }
   return TRUE;
 }
+#endif
 double InterFrameTargetHz() {
   const double forced = REXCVAR_GET(skate3_native_render_scene_interframes_target_hz);
   if (forced > 0.0) {
@@ -10556,6 +10558,7 @@ double InterFrameTargetHz() {
   const double now = InterFrameNow();
   if (now >= s_next) {
     s_next = now + 2.0;
+#if defined(_WIN32)
     HWND wnd = nullptr;
     EnumWindows(&InterFrameFindOwnWindow, reinterpret_cast<LPARAM>(&wnd));
     HMONITOR mon = wnd != nullptr ? MonitorFromWindow(wnd, MONITOR_DEFAULTTOPRIMARY)
@@ -10573,6 +10576,7 @@ double InterFrameTargetHz() {
       }
       s_hz = hz;
     }
+#endif
   }
   return s_hz;
 }

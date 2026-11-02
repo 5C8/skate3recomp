@@ -86,6 +86,9 @@ cmake --build --preset linux-amd64-release --parallel 4
 ```
 
 The output is `out/build/<preset>/skate3` plus `librexruntime.so` (Linux) or
-`librexruntime.dylib` (macOS). Split screen and SteamVR are Windows-only. The upstream reference is
+`librexruntime.dylib` (macOS), copied beside the executable by the build. Split
+screen and SteamVR are Windows-only, and frame interpolation targets 60 Hz unless
+`skate3_native_render_scene_interframes_target_hz` is set (Windows reads the
+monitor's refresh rate). The upstream reference is
 preserved in [UPSTREAM_README.md](UPSTREAM_README.md); its release links/version
 claims refer to upstream rather than this snapshot.
