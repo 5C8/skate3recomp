@@ -22,10 +22,21 @@ if project=='rexglue-skate3':
         if name not in files:parser.error('SDK file missing: '+name)
 else:
     if not args.build_dir:parser.error('--build-dir is required for a game')
-    exe='skate3.exe' if project=='skate3recomp' else 'sk83_na_m.exe'
-    required=[exe,'rexruntime.dll']
-    if project=='sk83_na_m':required+=['sk83_na_m_EAWebkit.dll']
-    optional=['TracyClient.dll','openvr_api.dll','mimalloc.dll','mimalloc-redirect.dll']
+    name='skate3' if project=='skate3recomp' else 'sk83_na_m'
+    if (args.build_dir/(name+'.exe')).is_file():
+        required=[name+'.exe','rexruntime.dll']
+        if project=='sk83_na_m':required+=['sk83_na_m_EAWebkit.dll']
+        optional=['TracyClient.dll','openvr_api.dll','mimalloc.dll','mimalloc-redirect.dll']
+    elif (args.build_dir/'librexruntime.dylib').is_file():
+        # macOS (Apple Silicon): Vulkan through MoltenVK, staged beside the
+        # executable by rexglue_configure_target together with its ICD file.
+        required=[name,'librexruntime.dylib']
+        optional=['libTracyClient.dylib','libamd_fidelityfx_vk.dylib',
+                  'libvulkan.1.dylib','libvulkan.dylib','libMoltenVK.dylib','MoltenVK_icd.json']
+    else:
+        # Linux: Vulkan from the system loader; the exe's RPATH is $ORIGIN.
+        required=[name,'librexruntime.so']
+        optional=['libTracyClient.so','libamd_fidelityfx_vk.so']
     for name in required+optional:
         p=args.build_dir/name
         if p.is_file():files[name]=p
