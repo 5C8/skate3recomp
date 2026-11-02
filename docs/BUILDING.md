@@ -49,9 +49,46 @@ For SteamVR, run `python tools/fetch_openvr.py` before building, or copy
 is omitted from Git source. Shader SPIR-V is checked in; after modifying HLSL,
 set `SKATE3_DXC` to a SPIR-V-capable DXC executable and regenerate shaders.
 
-Linux/macOS presets and platform code are inherited from upstream. Only Windows
-x64 binaries are published and checked in this snapshot; other platforms require
-their own matching SDK/toolchain and testing. The Windows-only split-screen and
-VR integrations should not be assumed to work there. The upstream reference is
+## Linux and macOS
+
+Linux x64 and macOS (Apple Silicon) build from the same sources with the
+`linux-amd64-release` and `macos-arm64-release` presets. Both use the Vulkan
+backend (macOS through MoltenVK). Point `REXSDK_DIR` at a recursive clone of the
+matching SDK tag:
+
+```bash
+git clone --recursive --branch v0.8.2.95-skate3.20261029 https://github.com/5C8/rexglue-skate3 ~/dev/rexglue-skate3
+```
+
+On Linux (Ubuntu 24.04 shown), install clang/lld 20, CMake, Ninja, Python 3
+and the SDK's UI dependencies:
+
+```bash
+sudo apt install clang-20 lld-20 cmake ninja-build python3 libgtk-3-dev libvulkan-dev libx11-xcb-dev libsdl2-dev
+```
+
+On macOS, install the Homebrew LLVM toolchain and the Vulkan loader/MoltenVK
+(or the LunarG Vulkan SDK with `VULKAN_SDK` set); the build copies
+`libvulkan`, `libMoltenVK` and `MoltenVK_icd.json` next to the executable:
+
+```bash
+brew install llvm cmake ninja python molten-vk vulkan-loader
+```
+
+Then build exactly as on Windows, substituting the preset (`macos-arm64-release`
+on a Mac):
+
+```bash
+cmake --preset linux-amd64-release -DREXSDK_DIR=$HOME/dev/rexglue-skate3 -DSKATE3_GAME_DATA_ROOT=$HOME/Games/Skate3 -DSKATE3_TITLE_UPDATE_PACKAGE=$HOME/Games/Skate3-TU3
+cmake --build --preset linux-amd64-release --target generate-all --parallel 4
+cmake --preset linux-amd64-release -DREXSDK_DIR=$HOME/dev/rexglue-skate3 -DSKATE3_GAME_DATA_ROOT=$HOME/Games/Skate3 -DSKATE3_TITLE_UPDATE_PACKAGE=$HOME/Games/Skate3-TU3
+cmake --build --preset linux-amd64-release --parallel 4
+```
+
+The output is `out/build/<preset>/skate3` plus `librexruntime.so` (Linux) or
+`librexruntime.dylib` (macOS), copied beside the executable by the build. Split
+screen and SteamVR are Windows-only, and frame interpolation targets 60 Hz unless
+`skate3_native_render_scene_interframes_target_hz` is set (Windows reads the
+monitor's refresh rate). The upstream reference is
 preserved in [UPSTREAM_README.md](UPSTREAM_README.md); its release links/version
 claims refer to upstream rather than this snapshot.

@@ -8,6 +8,14 @@ The packager includes docs, dependency notices and per-file SHA-256 checksums.
 python tools/package_release.py --build-dir out/build/win-amd64-release --title-update-dir C:/Private/Skate3-TU3 --output skate3recomp-Windows-x64.zip
 ```
 
+Linux and macOS builds use the same packager; it detects the platform from the
+runtime files in the build directory:
+
+```bash
+python3 tools/package_release.py --build-dir out/build/linux-amd64-release --title-update-dir ~/Private/Skate3-TU3 --output skate3recomp-Linux-x64.zip
+python3 tools/package_release.py --build-dir out/build/macos-arm64-release --title-update-dir ~/Private/Skate3-TU3 --output skate3recomp-macOS-arm64.zip
+```
+
 Create a GitHub release from the corresponding source tag and attach the ZIP
 and its SHA-256 checksum. Game binaries contain the compiled implementation;
 the generated main-game implementation must remain local and ignored. The patch

@@ -94,12 +94,12 @@ constexpr std::string_view kHudMovies[] = {
 uint32_t LoadU32(uint8_t* base, uint32_t addr) {
   uint32_t v;
   std::memcpy(&v, REX_RAW_ADDR(addr), 4);
-  return _byteswap_ulong(v);
+  return __builtin_bswap32(v);
 }
 uint16_t LoadU16(uint8_t* base, uint32_t addr) {
   uint16_t v;
   std::memcpy(&v, REX_RAW_ADDR(addr), 2);
-  return _byteswap_ushort(v);
+  return __builtin_bswap16(v);
 }
 float LoadF32(uint8_t* base, uint32_t addr) {
   const uint32_t u = LoadU32(base, addr);
@@ -108,13 +108,13 @@ float LoadF32(uint8_t* base, uint32_t addr) {
   return f;
 }
 void StoreU32(uint8_t* base, uint32_t addr, uint32_t v) {
-  v = _byteswap_ulong(v);
+  v = __builtin_bswap32(v);
   std::memcpy(REX_RAW_ADDR(addr), &v, 4);
 }
 void StoreF32(uint8_t* base, uint32_t addr, float f) {
   uint32_t u;
   std::memcpy(&u, &f, 4);
-  u = _byteswap_ulong(u);
+  u = __builtin_bswap32(u);
   std::memcpy(REX_RAW_ADDR(addr), &u, 4);
 }
 

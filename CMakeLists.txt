@@ -569,6 +569,23 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/openvr/openvr_api.dl
         VERBATIM)
 endif()
 
+# Linux/macOS: the executable's RPATH is its own directory, but an SDK source
+# tree builds librexruntime into the SDK's out/ folder. Stage it beside the
+# executable (Windows already copies its runtime DLLs after linking).
+if(NOT WIN32)
+    add_custom_target(skate3_stage_runtime_library
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:skate3>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:rex::runtime>"
+            "$<TARGET_FILE_DIR:skate3>"
+        VERBATIM
+    )
+    if(TARGET rexruntime)
+        add_dependencies(skate3_stage_runtime_library rexruntime)
+    endif()
+    add_dependencies(skate3 skate3_stage_runtime_library)
+endif()
+
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
     add_custom_target(skate3_stage_title_update_patches
         COMMAND ${CMAKE_COMMAND} -E make_directory

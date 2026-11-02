@@ -233,14 +233,29 @@ extern "C" void __imp__XMsgStartIORequest(PPCContext& ctx, uint8_t* base) {
 // arguments and result and forwards to the real rexruntime export, so behaviour
 // is unchanged - retail's final build has no debug prints to follow instead.
 // ---------------------------------------------------------------------------
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#include <strings.h>
+#endif
 
 namespace {
 using GuestFn = void (*)(PPCContext&, uint8_t*);
+// The runtime library's own export, not this executable's override of it.
 GuestFn Real(const char* name) {
+#if defined(_WIN32)
   static HMODULE rt = GetModuleHandleA("rexruntime.dll");
   return rt ? reinterpret_cast<GuestFn>(GetProcAddress(rt, name)) : nullptr;
+#else
+#if defined(__APPLE__)
+  static void* rt = dlopen("@rpath/librexruntime.dylib", RTLD_LAZY | RTLD_NOLOAD);
+#else
+  static void* rt = dlopen("librexruntime.so", RTLD_LAZY | RTLD_NOLOAD);
+#endif
+  return rt ? reinterpret_cast<GuestFn>(dlsym(rt, name)) : nullptr;
+#endif
 }
 }  // namespace
 
@@ -344,7 +359,15 @@ TRACE_FORWARD(NetDll_inet_addr)
 //   XONLINE_SERVICE_INFO { DWORD dwServiceID; IN_ADDR serviceIP; WORD wServicePort; WORD wReserved; }
 // ---------------------------------------------------------------------------
 #include <rex/cvar.h>
+#if defined(_WIN32)
 #include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#define _stricmp strcasecmp
+#endif
 #include <string>
 
 namespace {
