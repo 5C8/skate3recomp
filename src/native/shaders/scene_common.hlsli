@@ -7,6 +7,38 @@
 // exact for the GetTangentLight kd SIGN terms under ANY UV orientation:
 // bowl/ramp walls map their texture rotated relative to world-up, and
 // mirrored islands flip dP/dU exactly like the stored tangent does.
+// The console's ISOTROPIC cube-fetch LOD: log2 of the larger screen
+// gradient of the selected face's coordinate (sc/|ma|, tc/|ma|) * 0.5 *
+// face size. The game's reflective cube fetch (baseenvironmentreflective
+// tf9, F11 snapshot 1794316632) is NON-anisotropic with a POINT mip filter;
+// the scene sampler is 8x anisotropic, under which the hardware derives the
+// LOD from the SMALLER gradient axis, so normal-mapped reflections resolved
+// mips sharper than the game's. Callers SampleLevel at round(this): an
+// explicit LOD also skips the anisotropic footprint.
+float CubeIsoLod(TextureCube<float4> cube, float3 d) {
+  uint w, h, levels;
+  cube.GetDimensions(0, w, h, levels);
+  const float3 dx = ddx(d), dy = ddy(d);
+  const float3 a = abs(d);
+  float m, mdx, mdy;
+  float2 st, sdx, sdy;
+  if (a.x >= a.y && a.x >= a.z) {
+    m = a.x; st = d.yz; sdx = dx.yz; sdy = dy.yz;
+    mdx = dx.x * sign(d.x); mdy = dy.x * sign(d.x);
+  } else if (a.y >= a.z) {
+    m = a.y; st = d.xz; sdx = dx.xz; sdy = dy.xz;
+    mdx = dx.y * sign(d.y); mdy = dy.y * sign(d.y);
+  } else {
+    m = a.z; st = d.xy; sdx = dx.xy; sdy = dy.xy;
+    mdx = dx.z * sign(d.z); mdy = dy.z * sign(d.z);
+  }
+  m = max(m, 1e-6);
+  const float k = 0.5 * float(w) / (m * m);
+  const float2 gx = (sdx * m - st * mdx) * k;
+  const float2 gy = (sdy * m - st * mdy) * k;
+  const float rho2 = max(dot(gx, gx), dot(gy, gy));
+  return 0.5 * log2(max(rho2, 1e-12));
+}
 void ScreenTangentFrame(float3 wn, float3 rpos, float2 uv,
                         out float3 tt, out float3 bb) {
   float3 dp1 = ddx(rpos), dp2 = ddy(rpos);

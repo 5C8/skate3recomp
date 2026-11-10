@@ -115,7 +115,7 @@ struct CategoryInfo {
   const char* name;
   const char* desc;
 };
-constexpr std::array<CategoryInfo, 6> kCategories = {{
+constexpr std::array<CategoryInfo, 7> kCategories = {{
     {"Video", "Display, resolution, framerate and graphics settings. Changes apply "
               "immediately unless marked Next launch."},
     {"Controls", "Controller, mouse and keyboard input settings."},
@@ -123,6 +123,7 @@ constexpr std::array<CategoryInfo, 6> kCategories = {{
     {"Online", "Custom server, your gamertag and profile sign-in."},
     {"System", "Game language, debugging features and session settings."},
     {"VR", "Headset view and HUD settings. Apply immediately while in VR."},
+    {"Mods", "Changes to how the game works, for custom content. Apply immediately."},
 }};
 
 // Draw distance (skate3recomp): one multiplier for both the world detail cull
@@ -267,7 +268,7 @@ bool D3D12Active() {
 
 // Every cvar this menu owns, persisted to the config on each change.
 std::vector<std::string_view> GetSettingsCvars() {
-  static constexpr std::array<std::string_view, 40> kNames = {
+  static constexpr std::array<std::string_view, 41> kNames = {
       "net_host_overrides",
       "skate3_native_render_scene",
       "skate3_native_render_scene_msaa",
@@ -308,6 +309,7 @@ std::vector<std::string_view> GetSettingsCvars() {
       "skate3_vr_hud_scale",
       "skate3_vr_render_scale",
       "skate3_vr_msaa",
+      "skate3_mod_skater_proportions",
   };
   std::vector<std::string_view> names;
   for (std::string_view name : kNames) {
@@ -976,6 +978,8 @@ void SettingsMenu::Show() {
 
 void SettingsMenu::LoadSettingsFromCvars() {
   zd_debug_features_ = HasCvar("zd_debug") && rex::cvar::Query<bool>("zd_debug");
+  mod_skater_proportions_ =
+      HasCvar("skate3_mod_skater_proportions") && rex::cvar::Query<bool>("skate3_mod_skater_proportions");
   device_list_ = GetGraphicsDeviceList();
   graphics_api_index_ = HasGraphicsApiChoice() ? GraphicsApiIndexFromCvar() : 0;
   device_index_ = DeviceIndexFromCvar(device_list_);
@@ -2010,6 +2014,18 @@ void SettingsMenu::BuildRows(std::vector<RowSpec>& rows, int category) {
                   "Size of the third-person HUD relative to the game's own screen. Lower "
                   "keeps corner elements out of the lens edges.",
                   &vr_hud_scale_, "skate3_vr_hud_scale", 30.0f, 150.0f, 5.0f, 100.0, 1.0);
+      break;
+    }
+    case 6: {  // Mods
+      header("Skaters");
+      if (HasCvar("skate3_mod_skater_proportions")) {
+        bool_row("Own skater proportions",
+                 "Skaters keep the bone lengths of their own models, so custom skaters with "
+                 "shorter or longer limbs move with their own proportions. Retail skaters are "
+                 "unchanged. Physics and board contact stay the game's.",
+                 &mod_skater_proportions_, "skate3_mod_skater_proportions", false);
+        rows.back().checkbox = true;
+      }
       break;
     }
     default:

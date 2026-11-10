@@ -30,8 +30,10 @@ CharLightTerms CharLight(VSOut i, float3 cn, float3 vd) {
   }
   t.vn = vn;
   t.vndl_u = dot(vn, ch_light.xyz);
+  // Static world shadow floored at g_CSMSelfBias.w (ch_amb.z; retail
+  // `max world, c8.w / c31.w` before the min with the cascade).
   t.csm = min(SampleCsmShadowChar(i.rpos + cam_pos.xyz, i.pos.xy),
-              CharStaticShade(i.rpos + cam_pos.xyz, cn, i.pos.xy));
+              max(CharStaticShade(i.rpos + cam_pos.xyz, cn, i.pos.xy), ch_amb.z));
   float3 irr = saturate(
       ch_sh[0].rgb + vn.x * ch_sh[1].rgb + vn.y * ch_sh[2].rgb +
       vn.z * ch_sh[3].rgb + (vn.x * vn.z) * ch_sh[4].rgb +
@@ -199,69 +201,92 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
     }
     lin = col * (ch_tintB.w * (1.0 + sh_fogc.a * f1)) + sh_fogc.rgb * f1;
     out_a = ch_misc.x;
-  } else if (fam > 3.5 && fam < 4.5) {
-    // cac_hair_defaultPS (+ its _ropa twin, identical ucode), transcribed
-    // from this build's .fpo (literals c252 = (0.25, -1, 1, 0), c253 =
-    // (0.75, 1.75, 0.5, 256.5)):
-    //   10/15/28-33: N' = normalize(nm.x T + nm.y B + nz N), tf4.wy normal
-    //   16-21/24-26: H = normalize(V + L)          (V = c4 - pos, L = c3)
-    //   32/36/38-39: kk = sqrt(1 - (H.T)^2)        (Kajiya-Kay, tangent T)
-    //   34-35: wrap = sat(0.75 N'.L + 0.25), ramp = sat(1.75 N'.L + 0.25)
-    //   11-14/22-31: shadow = static world-shadow, bilinear 4 taps (tf1)
-    //   37/42: diffuse = (wrap * shadow + c13.w / 4) * c15.rgb
-    //   40-46: spec = kk^c10.w * c16.rgb * ramp * D^2 * shadow
-    //   47: col = diffuse * D^2 + spec ; 48 fog ; 49-57 tone (c7.z)
-    //   57: alpha = tf5(uv2) * c14.x
-    // There is NO ambient/SH and NO cascade term. The old approximation
-    // swapped the Kajiya-Kay highlight (near 1 across most strands) for a
-    // fresnel rim (near 0 on camera-facing hair), which left lit hair at
-    // roughly a third of the game's brightness. The tangent is the
-    // U-aligned screen frame (the skinned layout carries no stored frame);
-    // its sign is irrelevant to (H.T)^2. The world-shadow term follows the
-    // renderer-wide substitution of the static sun map for the game's
-    // world-shadow map (hair never renders into it: base bias only).
+  } else if (fam > 3.5 && fam < 5.5) {
+    // Hair, transcribed from the RETAIL ucode (tools/sk83_port/
+    // disasm_retail; sk83_na_m's dev compiles are one row lower and lack
+    // the shadow floor). Both hair VSes fetch TANGENT/BINORMAL only and
+    // output o1 = cross(T, B) (the normal; i.nrm, see the mesh decode),
+    // o2 = T (i.tanb), o3 = B (= cross(N, T) for that N). Shared terms:
+    //   N' = normalize(nz * N + map.y * B + map.w * T)   (tf4.wy, .ag here)
+    //   shadow = max(world-shadow bilinear 4 taps, c3.w)  (cac 46 / def 45)
+    //   col * fog.w + fog.rgb, tone (c8.z), alpha = tf5(uv2).r * scale
+    // Meshes without a stored pair keep the screen-space cotangent frame.
+    const bool has_t = i.tanb.w > 0.5 && dot(i.tanb.xyz, i.tanb.xyz) > 1e-6;
     float3 tt, bb;
-    ScreenTangentFrame(cn, i.rpos, i.uv, tt, bb);
+    if (has_t) {
+      tt = i.tanb.xyz;
+      bb = cross(cn, normalize(tt));
+    } else {
+      ScreenTangentFrame(cn, i.rpos, i.uv, tt, bb);
+    }
     float3 vn = cn;
     if (overlay.z > 0.5) {
       float2 nm = macro.Sample(smp, i.uv).ag * 2.0 - 1.0;
       vn = normalize(nm.x * tt + nm.y * bb +
                      cn * sqrt(saturate(1.0 - dot(nm, nm))));
     }
-    const float3 hv = normalize(vd + ch_light.xyz);
-    // Kajiya-Kay axis = the mesh's skinned usage-6 tangent (VS o2 -> PS r2),
-    // carried in tanb (w = 1 when present); the screen U axis only as the
-    // fallback for meshes without one.
-    const float3 kk_t = (i.tanb.w > 0.5 && dot(i.tanb.xyz, i.tanb.xyz) > 1e-6)
-                            ? normalize(i.tanb.xyz)
-                            : tt;
-    const float th = dot(hv, kk_t);
-    const float kk = sqrt(saturate(1.0 - th * th));
+    const float sh = max(CharStaticShade(i.rpos + cam_pos.xyz, cn, i.pos.xy),
+                         ch_tintA.x);
     const float nl = dot(vn, ch_light.xyz);
-    const float wrap = saturate(nl * 0.75 + 0.25);
-    const float ramp = saturate(nl * 1.75 + 0.25);
-    const float sh = CharStaticShade(i.rpos + cam_pos.xyz, cn, i.pos.xy);
-    const float3 diff = (wrap * sh + ch_amb.w) * ch_key.rgb;
-    const float3 spec = pow(max(kk, 1e-6), ch_light.w) * ch_tintB.rgb * ramp * sh;
-    lin = dlin * (diff + spec);
-    out_a = saturate(decal_art.Sample(smp, i.uv2).r * ch_tintB.w);
-  } else if (fam > 3.5) {
-    // Hair (defaulthair): key on a wrapped N.L ramp + flat
-    // ambient, fresnel rim tint on a steeper ramp; strand coverage from
-    // the mesh's "alpha" channel at the raw second texcoord (bound at t4)
-    // - alpha-blended in the sorted sub-pass (hair drawn opaque is the
-    // blocky-helmet look).
-    // World shadow: defaulthair_defaultPS samples the world-shade map like
-    // every receiver (four tf1 taps at +-0.5 texel, sge against the c3 ray,
-    // frac-bilinear) and multiplies it into the key diffuse (sat(N.L) * c10
-    // * shadow) and the c12 highlight; the c15 fresnel rim stays unshadowed
-    // (sk83_na_m's build: the same program one register lower). Without it
-    // the hair stayed sunlit under world shadow that darkened the body.
-    const float sh = CharStaticShade(i.rpos + cam_pos.xyz, cn, i.pos.xy);
-    float fres = pow(1.0 - saturate(dot(cn, vd)), max(ch_light.w, 1.0));
-    float3 hl = ch_key.rgb * (saturate(ndl * 0.75 + 0.25) * sh + ch_amb.w) +
-                ch_tintB.rgb * fres * saturate(ndl * 1.75 + 0.25);
-    lin = dlin * hl;
+    float3 col;
+    float fog_mul = 1.0;
+    if (fam < 4.5) {
+      // cac_hair_defaultPS (+ _ropa, identical ucode). Literals c253 =
+      // (0.25, -1, 1, 2), c254 = (0.75, 1.75, 0.5, 256.5):
+      //   17-27: H = normalize(normalize(c5 - pos) + c4)
+      //   28/29/31/33: kk = sqrt(1 - (H . T)^2)       (T = raw o2)
+      //   41-42: wrap = sat(0.75 N'.L + 0.25), ramp = sat(1.75 N'.L + 0.25)
+      //   33/48-49: diffuse = (wrap * shadow + c14.w / 4) * c16.rgb
+      //   35/39/43/45/47: spec = kk^c11.w * c17.rgb * ramp * D^2 * shadow
+      //   50: col = diffuse * D^2 + spec
+      // There is NO ambient/SH and NO cascade term.
+      const float3 hv = normalize(vd + ch_light.xyz);
+      const float th = dot(hv, tt);
+      const float kk = sqrt(saturate(1.0 - th * th));
+      const float wrap = saturate(nl * 0.75 + 0.25);
+      const float ramp = saturate(nl * 1.75 + 0.25);
+      const float3 diff = (wrap * sh + ch_amb.w) * ch_key.rgb;
+      const float3 spec = pow(max(kk, 1e-6), ch_light.w) * ch_tintB.rgb * ramp * sh;
+      col = dlin * (diff + spec);
+    } else {
+      // defaulthair_defaultPS (+ _ropa). Literals c252 = (0.25, 1, 0, 2),
+      // c253 = (0.2, -1, 0.5, 256.5). Rows: key c10 (w = key-spec fresnel
+      // exponent), fresnel exponent c9.z, multiplier c9.y, key spec c11,
+      // rim spec c12, back-rim light c15 (capture: ch_key = c10, ch_tintB =
+      // c15, ch_sh[0] = c11, ch_sh[1] = c12, ch_sh[2].xy = (c9.y, c10.w)):
+      //   24/30: R = normalize(L * (-1, 0.2, -1) - V)        (back-rim dir)
+      //   37-40/46: F = (1 - sat(N'.V))^c9.z, F2 = (1 - sat(N'.V))^c10.w
+      //   36/46-49: diffuse = c10 sat(N'.L) shadow + c14.w / 4
+      //                       + c15 sat(sat(N'.R) F)
+      //   42/45/50-52: sL = sat(V . -reflect(L))^c11.w
+      //   41/43/44/51: sR = sat(V . -reflect(R))^c12.w
+      //   53-57: spec = sat(D.a^2 (c11 sL shadow F2 + c12 sR F))
+      //   58-59: (D^2 diffuse + spec) * (c9.y fog.w) + fog.rgb
+      // The old port swapped c10/c15 (key as the rim, rim as the key) and
+      // had neither spec lobe.
+      const float3 rd = normalize(ch_light.xyz * float3(-1.0, 0.2, -1.0) - vd);
+      const float fb = 1.0 - saturate(dot(vn, vd));
+      const float fr = pow(max(fb, 1e-6), ch_light.w);
+      const float fr2 = pow(max(fb, 1e-6), ch_sh[2].y);
+      const float nr = dot(vn, rd);
+      const float3 diff = ch_key.rgb * saturate(nl) * sh + ch_amb.w +
+                          ch_tintB.rgb * saturate(saturate(nr) * fr);
+      const float3 rl = ch_light.xyz - 2.0 * nl * vn;
+      const float3 rr = rd - 2.0 * nr * vn;
+      const float sl = pow(max(saturate(dot(vd, -rl)), 1e-6), ch_sh[0].w);
+      const float sr = pow(max(saturate(dot(vd, -rr)), 1e-6), ch_sh[1].w);
+      const float gloss = albedo.a * albedo.a;
+      const float3 spec = saturate(gloss * (ch_sh[0].rgb * sl * sh * fr2 +
+                                            ch_sh[1].rgb * sr * fr));
+      col = dlin * diff + spec;
+      fog_mul = ch_sh[2].x;
+    }
+    // Global distance fog: the VS c5/c6 ramp, as the vehicle branch.
+    float f1 = saturate(length(i.rpos) * sh_fogp.x + sh_fogp.y);
+    if (sh_fogp.z != 1.0) {
+      f1 = pow(max(f1, 1e-6), sh_fogp.z);
+    }
+    lin = col * (fog_mul * (1.0 + sh_fogc.a * f1)) + sh_fogc.rgb * f1;
     out_a = saturate(decal_art.Sample(smp, i.uv2).r * ch_tintB.w);
   } else if (fam > 2.5 && fam < 3.5 && ch_misc.z > 1.5) {
     // Far pedestrians: defaultlivingworld_defaultPS, transcribed from its

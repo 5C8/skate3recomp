@@ -446,6 +446,18 @@ void LoadAndNormalizeSimpleSettings(const std::filesystem::path& settings_path,
   rex::ui::EnsureSimpleSettingsConfig(settings_path);
 }
 
+}  // namespace
+
+namespace skate3 {
+namespace {
+std::filesystem::path g_game_data_root;
+}
+void SetGameDataRoot(const std::filesystem::path& root) { g_game_data_root = root; }
+const std::filesystem::path& GameDataRoot() { return g_game_data_root; }
+}  // namespace skate3
+
+namespace {
+
 std::filesystem::path ResolveRuntimeGameDataRoot(const rex::PathConfig& paths) {
   if (!paths.game_data_root.empty()) {
     return paths.game_data_root;
@@ -620,6 +632,7 @@ std::optional<rex::PathConfig> Skate3BaseApp::OnFinalizePaths(
 #endif
   auto runtime_paths = defaults;
   runtime_paths.game_data_root = ResolveRuntimeGameDataRoot(runtime_paths);
+  skate3::SetGameDataRoot(runtime_paths.game_data_root);
   runtime_paths.config_path.clear();
   if (!skate3::IsGameInstalled(runtime_paths.game_data_root)) {
     REXLOG_INFO("Game files not found at {}; launching rexglue ISO installer",

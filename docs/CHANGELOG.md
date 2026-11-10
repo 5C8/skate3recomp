@@ -1,5 +1,38 @@
 # Release notes
 
+## 1.0.8
+
+- **Glass reflections:** reflective glass facades
+  (`baseenvironmentreflective_simple`) now build their reflection normal like
+  the game: on the mesh's stored tangent frame, without the base material's
+  detail-map tilt and without clamping the normal map's z. Each pane now
+  reflects the same part of the environment cube as in the original renderer.
+- **World normals:** world materials now rebuild the vertex normal's z like
+  the game's vertex shaders (`z = sign * sqrt(1 - min(x^2 + y^2, 0.999))`).
+  The clamp gives X-facing facades a small per-UV-island tilt, which the
+  glass reflections depend on.
+- **Reflective paving:** `baseenvironmentreflective` (reflective paving) uses
+  the mesh's stored tangent and the game's normalized tangent-space normal for
+  its reflection, and the environment cube is sampled at the console's
+  isotropic, nearest-mip level instead of an anisotropic one.
+- **Reflection cube:** reflective materials take the cube the game binds for
+  their draw instead of the material's `environment` channel.
+- **Hair:** the create-a-skater (`cac_hair`) and default hair shaders follow
+  the game's code. Hair is lit along the strand direction from the mesh's
+  tangent; it used to fall back to a screen-space axis, which made hair flat
+  and too bright. The default hair shader's key and rim colours were swapped,
+  and its two specular highlights were missing. World shadow on hair is
+  limited by the game's shadow floor.
+- **Skaters in shadow:** clothing, skin and the board keep the fraction of
+  sunlight the game keeps in building shadow (`g_CSMSelfBias.w` floor on the
+  world shadow), instead of turning almost black.
+- **Own skater proportions (Mods):** new **Settings > Mods** option. Custom
+  skaters keep the bone lengths of their own models; retail skaters are
+  unchanged. Off by default.
+- **Custom songs:** the iPod song list can be extended or replaced with
+  `data/audio/music/custom_songs.txt` (up to 99 songs). Without the file
+  nothing changes.
+
 ## 1.0.7
 
 - **Online web pages:** skate.Feed, leaderboards, team pages and the other

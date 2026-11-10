@@ -809,6 +809,17 @@ struct AdDrawState {
   uint32_t tf4[6] = {};
   uint32_t tf3[6] = {};
 };
+// DrawKey -> the environment cube a reflective world draw actually samples
+// (baseenvironmentreflective[/transparentbase...] tf9, _simple tf7,
+// transparentenvironmentreflective tf6): the texture object the game bound
+// in that slot for the island's main-pass draw. Registered by
+// ApplyRefCubeState, filled by the indexed-draw hook. Guarded by
+// g_palette_mutex.
+struct RefCubeDrawState {
+  bool seen = false;
+  uint32_t tex = 0;
+  uint32_t normal = 0;  // baseenvironmentreflective's tf8 normal map
+};
 // DrawKey -> everything the indexed-draw hook records per island, in ONE
 // map (one lookup per draw in the hook, one per island per item build;
 // six separate maps cost six of each). `mesh` is the owning mesh (buffer
@@ -822,8 +833,9 @@ enum : uint8_t {
   kIslFlow = 8,
   kIslAd = 16,
   kIslRs = 32,
+  kIslRefCube = 64,
   // The families the hook captures on EVERY draw of the island.
-  kIslPerDraw = kIslDecal | kIslTraffic | kIslHom | kIslFlow | kIslAd,
+  kIslPerDraw = kIslDecal | kIslTraffic | kIslHom | kIslFlow | kIslAd | kIslRefCube,
 };
 struct IslandState {
   uint32_t mesh = 0;
@@ -834,6 +846,7 @@ struct IslandState {
   HomDrawState hom;
   AdDrawState ad;
   FlowWaterDrawState flow;
+  RefCubeDrawState refcube;
 };
 inline PooledFlatMap<uint64_t, IslandState> g_islands;
 // The islands the indexed-draw hook must look up on every draw: a per-draw

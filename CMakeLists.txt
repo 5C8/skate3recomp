@@ -11,7 +11,7 @@ if(SKATE3_STATIC_MSVC_RUNTIME)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(skate3 VERSION 1.0.7 LANGUAGES CXX)
+project(skate3 VERSION 1.0.8 LANGUAGES CXX)
 
 # Existing checkouts may still have the retired movie override in generated
 # sources. Repair them before compiling; fresh codegen keeps the original call.
@@ -274,6 +274,8 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_native_scene_post.cpp
     src/skate3_screenshot.cpp
     src/skate3_deck_shadow.cpp
+    src/skate3_skater_proportions.cpp
+    src/skate3_custom_songs.cpp
     src/skate3_native_font_atlas.cpp
     src/generated/skate3_native_font_data.cpp
     # src/skate3_frustum_cull.cpp  # sk83_na_m native DoFrustumCulling replacement: dev-build LOD fields (cam+5248/5252/5256) retail does not have

@@ -134,6 +134,7 @@ class SettingsMenu final : public rex::ui::ImGuiDialog {
   bool mode_indicator_ = false;
   bool fps_counter_ = false;
   bool zd_debug_features_ = false;
+  bool mod_skater_proportions_ = false;
   bool mnk_mode_ = false;
   bool mnk_capture_mouse_ = true;
   bool audio_mute_ = false;

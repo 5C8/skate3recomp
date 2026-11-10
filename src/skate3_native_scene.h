@@ -412,6 +412,12 @@ struct DrawItem {
   // flowingwater families ignore it).
   uint32_t water_normal2 = 0;
   uint32_t water_env;  // `environment` channel cube map (reflection term)
+  // Reflective world families (env 5/6/13): the cube texture object the
+  // game bound for this item's main-pass draw (RefCubeDrawState); 0 = not
+  // observed yet (the `environment` channel above is the fallback).
+  uint32_t ref_cube = 0;
+  // ... and its bound tf8 normal map (baseenvironmentreflective only).
+  uint32_t ref_normal = 0;
   // water_defaultPS refracts the FRAMEBUFFER from tf3. The game resolves the
   // scene into a texture and binds it there itself, so we take that binding
   // (recorded by the D3DDevice_SetTexture hook) rather than adding a

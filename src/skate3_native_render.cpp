@@ -1,4 +1,5 @@
 #include "skate3_native_render.h"
+#include "skate3_skater_proportions.h"
 
 #include "native/skate3_native_diag.h"
 #include "native/skate3_native_entity.h"
@@ -619,6 +620,7 @@ extern "C" REX_FUNC(rex_Sk8_Render_cModelInstance_PackAndMultiplyMatricesForUplo
 extern "C" REX_FUNC(sub_827A52C8) {
   const uint32_t parts = ctx.r3.u32;
   const uint32_t count = ctx.r4.u32;
+  skate3::skater_proportions::BeforeBoneTransforms(ctx, base);   // Mods: own skater proportions
   __imp__sub_827A52C8(ctx, base);
   if (skate3::native_render::Enabled()) {
     skate3::native_palette::OnBoneTransforms(base, parts, count);
@@ -641,7 +643,9 @@ extern "C" REX_FUNC(rex_Sk8_cLivingWorldPresEntity_Update_UAAXXZ_827C1188) {
 // UpdateBoneTransforms calls inside stamp their snapshots with this entity.
 extern "C" REX_FUNC(rex_Sk8_SkaterPresEntity_StartJobs_QAAXXZ_827825B0) {
   const uint32_t prev_owner = skate3::native_palette::ExchangePackOwner(ctx.r3.u32);
+  const uint32_t prev_skater = skate3::skater_proportions::ExchangeEntity(ctx.r3.u32);  // Mods
   __imp__rex_Sk8_SkaterPresEntity_StartJobs_QAAXXZ_827825B0(ctx, base);
+  skate3::skater_proportions::ExchangeEntity(prev_skater);
   skate3::native_palette::ExchangePackOwner(prev_owner);
 }
 
@@ -686,7 +690,9 @@ extern "C" REX_FUNC(rex_Sk8_SkaterPresEntity_EndJobs_QAAXXZ_82782818) {
 extern "C" REX_FUNC(sub_82785778) {
   const uint32_t prev_owner =
       skate3::native_palette::ExchangePackOwner(ctx.r3.u32);
+  const uint32_t prev_skater = skate3::skater_proportions::ExchangeEntity(ctx.r3.u32);  // Mods
   __imp__sub_82785778(ctx, base);
+  skate3::skater_proportions::ExchangeEntity(prev_skater);
   skate3::native_palette::ExchangePackOwner(prev_owner);
 }
 

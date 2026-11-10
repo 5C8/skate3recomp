@@ -142,11 +142,12 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
   // Car bodies (family 6) carry their stored binormal in uv3 (see the mesh
   // decode); it rotates with the same bone rows as the normal, like the
   // vehicle VS's tangent pair.
-  // cac_hair (family 4) carries its stored usage-6 TANGENT the same way
-  // (the Kajiya-Kay strand axis, see the mesh decode and ShadeCharacter).
-  const bool veh_b = ((cam_pos.w > 5.5 && cam_pos.w < 6.5) ||
-                      (cam_pos.w > 3.5 && cam_pos.w < 4.5)) &&
-                     uv3.x > 14.0;
+  // Hair (families 4/5) carries its usage-6 TANGENT (the VS's o2: the
+  // Kajiya-Kay strand axis and the normal map's x axis) RAW: x + 16 in uv3.x,
+  // y in uv3.y, z in the fourth blend-weight byte (implied skinning never
+  // reads it); see the mesh decode.
+  const bool hair_t = cam_pos.w > 3.5 && cam_pos.w < 5.5 && uv3.x > 14.0;
+  const bool veh_b = cam_pos.w > 5.5 && cam_pos.w < 6.5 && uv3.x > 14.0;
   // Near livingworld pedestrians (family 3) carry their stored usage-6
   // TANGENT raw: x/y in uv3, z in uv2.x, uv2.y = 16 as the presence marker
   // (raw values interpolate exactly like the stamp VS's o2; see the mesh
@@ -155,6 +156,8 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
   float3 vb = float3(0.0, 0.0, 0.0);
   if (lw_t) {
     vb = float3(uv3.x, uv3.y, uv2.x);
+  } else if (hair_t) {
+    vb = float3(uv3.x - 16.0, uv3.y, bw.w * 2.0 - 1.0);
   } else if (veh_b) {
     const bool neg_z = uv3.x > 24.0;
     vb.x = uv3.x - (neg_z ? 32.0 : 16.0);
@@ -249,7 +252,7 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
   // RAW: ~0 = no stored frame, ~0.39 = negative handedness, ~0.78 =
   // positive (the DecodeMesh sentinel bytes 0/100/200).
   float3 sb = bw.xyz * 2.0 - 1.0;
-  o.tanb = (veh_b || lw_t) ? float4(vb, 1.0)
+  o.tanb = (veh_b || lw_t || hair_t) ? float4(vb, 1.0)
                  : (tint.g > 0.0 ? float4(0.0, 0.0, 0.0, 0.0)
                                  : float4(mul(sb, (float3x3)world), bw.w));
   // decal2 layer-2 UV: two IEEE halves packed little-endian in the
@@ -1020,6 +1023,8 @@ float4 ShadePixel(VSOut i) {
           // reflections; tune with the
           // slider first, promote the found value to a default after.
           float nm_bias = misc.z > 5.5 ? misc.w : 0.0;
+          // (The game fetches this map anisotropically too: tf8 aniso 4:1,
+          // trilinear, no LOD bias; F11 snapshot 1794316632.)
           float3 nmv = normal_map.SampleBias(smp, i.uv, nm_bias).rgb;
           // Exact composition: xy = 2*normal + 2*detail - 2, z = 2*n.z - 1.
           // The detail map is a CONSTANT 16x16 (0.514, 0.506), NOT the
@@ -1030,10 +1035,33 @@ float4 ShadePixel(VSOut i) {
           float trim_yi = floor(misc.x / 1000.0);
           float2 trim = float2(misc.x - trim_yi * 1000.0 - 500.0, trim_yi - 500.0) *
                         0.001;
+          // baseenvironmentreflective_SIMPLE (fam 6, the glass facades) has
+          // no detail map at all (tf4 diffuse, tf5 spec, tf6 normal, tf7
+          // cube): no fold. Adding the base family's detail trim tilted
+          // every pane by a constant (0.035, 0.020) -- part of the rotated
+          // facade reflections.
+          if (fam > 5.5 && fam < 6.5) {
+            trim = float2(0.0, 0.0);
+          }
           float3 nt = float3(nmv.xy * 2.0 - 1.0 + trim, nmv.z * 2.0 - 1.0);
           // (Frame construction hoisted above; the calibration notes ride
           // with it; tt/bb here are the shared axes.)
-          wn = normalize(nt.x * tt + nt.y * bb + wn * max(nt.z, 0.05));
+          const bool stored_t = i.tanb.w > 0.1 && i.tanb.w < 0.33;
+          if ((fam < 5.5 || fam > 12.5) && stored_t) {
+            // Exact (baseenvironmentreflective_defaultPS 31-40, the same in
+            // its transparent twin): nt normalized first, then n.x on the
+            // stored usage-6 tangent, n.y on B = sign.x * cross(N, T), n.z
+            // on N (kt/kb = KdAxes' tangent-stored branch).
+            const float3 nn = normalize(nt);
+            wn = normalize(nn.x * kt + nn.y * kb + nn.z * wn);
+          } else if (fam > 5.5 && fam < 6.5 && stored_t) {
+            // Exact (baseenvironmentreflective_simple_defaultPS 9/14-27): the
+            // RAW 2n - 1 on the same VS frame (o2 = usage-6 T, o3 = sign.x *
+            // cross(N, T)), z unclamped, then one normalize.
+            wn = normalize(nt.x * kt + nt.y * kb + nt.z * wn);
+          } else {
+            wn = normalize(nt.x * tt + nt.y * bb + wn * max(nt.z, 0.05));
+          }
           // v2: the reflective families share the kd term; fam 5
           // (reflective) is a base-family material and normalizes vnd for
           // the dot like baseenvironment; fam 6 (reflective_simple) uses
@@ -1083,7 +1111,9 @@ float4 ShadePixel(VSOut i) {
           float cube_extra = misc.z > 5.5 ? 0.0 : misc.w;
           float3 cube = abs(misc.z - 2.0) < 0.5
                             ? env_cube.SampleLevel(smp, dir, misc.w).rgb
-                            : env_cube.SampleBias(smp, dir, misc.y + cube_extra).rgb;
+                            : env_cube.SampleLevel(smp, dir,
+                                                   round(CubeIsoLod(env_cube, dir) + misc.y +
+                                                         cube_extra)).rgb;
           float rl = 0.3 * saturate(4.0 * masks.z - 2.6);
           float lum = lml.g + rl * (1.0 - lml.g);
           lin += cube * lum * masks.z * 1.5;

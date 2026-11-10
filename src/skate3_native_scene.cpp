@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -2808,6 +2809,48 @@ void ApplyFlowWaterState(DrawItem& item) {
   }
 }
 
+// Reflective world cube (DrawItem::ref_cube): register this item's islands
+// for the hook and adopt the cube the game bound on the first one seen
+// drawn: that is what the PS samples, whether or not it is the material's
+// `environment` channel (the ocean was proven to sample a different cube
+// than its channel, see g_ocean_tf7). Per-frame.
+void ApplyRefCubeState(uint8_t* base, DrawItem& item) {
+  item.ref_cube = 0;
+  item.ref_normal = 0;
+  if (!((item.env_family >= 5 && item.env_family <= 6) || item.env_family == 13)) {
+    return;
+  }
+  for (IslandState* st : g_item_islands) {
+    st->reg |= kIslRefCube;
+    if (item.ref_cube == 0 && st->refcube.seen) {
+      item.ref_cube = st->refcube.tex;
+      item.ref_normal = st->refcube.normal;
+    }
+  }
+  if (item.ref_cube == 0) {
+    return;
+  }
+  // One diagnostic line per mesh (first 32): the game's bound cube / normal
+  // map vs the material channels native would use, by physical base (fetch
+  // dword 1 at object + 0x20), plus the vertex layout the frame comes from.
+  static std::mutex s_mu;
+  static std::unordered_set<uint32_t> s_seen;
+  std::lock_guard<std::mutex> lk(s_mu);
+  if (s_seen.size() < 32 && s_seen.insert(item.mesh).second) {
+    const auto phys = [&](uint32_t obj) -> uint32_t {
+      uint32_t w1 = 0;
+      return obj != 0 && GuestTryLoadU32(base, obj + 8 * 4, &w1) ? (w1 & 0x1FFFF000u) : 0u;
+    };
+    REXLOG_INFO("native-scene: refl mesh {:08X} env {} cube bound {:08X}/{:08X} chan "
+                "{:08X}/{:08X} | normal bound {:08X}/{:08X} chan {:08X}/{:08X} | stride {} "
+                "nrm off {} fmt {} tan off {} fmt {} bin off {} tb {}",
+                item.mesh, item.env_family, item.ref_cube, phys(item.ref_cube), item.water_env,
+                phys(item.water_env), item.ref_normal, phys(item.ref_normal), item.water_normal,
+                phys(item.water_normal), item.stride, item.normal_offset, item.normal_fmt,
+                item.tangent_offset, item.tan_fmt, item.binormal_offset, item.tb_fmt);
+  }
+}
+
 // Advertisement rows + art (DrawItem::ad_rows / ad_fetch): register this
 // item's islands for the hook and adopt the first one it has seen drawn.
 // Per-frame.
@@ -3206,6 +3249,7 @@ bool BuildItemGeometry(uint8_t* base, uint32_t ctx, DrawItem& item) {
     ApplyTrafficDrawState(item);
     ApplyHomDrawState(item);
     ApplyFlowWaterState(item);
+    ApplyRefCubeState(base, item);
     ApplyWorldDrawRs(item);
     ApplyAdDrawState(item);
     // Islands the hook must see on every draw (see g_islands_hot).
@@ -5239,6 +5283,29 @@ void CaptureCharLighting(uint8_t* base, DrawItem& item) {
       // Fold the (3 s^2 Nz^2 - 1) term's -1 into the base row.
       d[3 * 4 + c] -= row(sh_base + 7u, uint32_t(c));
     }
+    {
+      // Diagnostic (env SKATE3_CHAR_SH_LOG=1): raw character SH rows, for
+      // comparing outdoor ambient against the PS3 port's i_shmult.
+      static const bool sh_log = std::getenv("SKATE3_CHAR_SH_LOG") != nullptr;
+      static std::atomic<int64_t> sh_log_next{0};
+      const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+      if (sh_log && now >= sh_log_next.load(std::memory_order_relaxed)) {
+        sh_log_next.store(now + 2000, std::memory_order_relaxed);
+        REXLOG_INFO(
+            "char-sh: fam={} plus={} s={:.4f} amb={:.4f} key=({:.3f},{:.3f},{:.3f}) "
+            "expo={:.3f} sh0=({:.4f},{:.4f},{:.4f}) sh1=({:.4f},{:.4f},{:.4f}) "
+            "sh2=({:.4f},{:.4f},{:.4f}) sh3=({:.4f},{:.4f},{:.4f}) "
+            "sh7=({:.4f},{:.4f},{:.4f})",
+            fam, plus, s, amb_mult, key[0], key[1], key[2], expo,
+            row(sh_base, 0), row(sh_base, 1), row(sh_base, 2),
+            row(sh_base + 1u, 0), row(sh_base + 1u, 1), row(sh_base + 1u, 2),
+            row(sh_base + 2u, 0), row(sh_base + 2u, 1), row(sh_base + 2u, 2),
+            row(sh_base + 3u, 0), row(sh_base + 3u, 1), row(sh_base + 3u, 2),
+            row(sh_base + 7u, 0), row(sh_base + 7u, 1), row(sh_base + 7u, 2));
+      }
+    }
     if (nis_kind == 2) {
       // defaultcharacter_ropa_nisPS ucode lines 74-89 (normal r3, light dot
       // r3.xzy . c0.zxy), mapped onto the gameplay basis order:
@@ -5540,15 +5607,39 @@ void CaptureCharLighting(uint8_t* base, DrawItem& item) {
     d[16 * 4 + 2] = 0.02f;
     d[16 * 4 + 3] = 1.0f;
   } else {
-    // Hair: flat ambient scalar + fresnel rim tint, strand-alpha scale.
+    // Hair, retail rows (ucode of cac_hair_defaultPS / defaulthair_defaultPS,
+    // see ShadeCharacter): ambient c14.w * 0.25 (both), strand-alpha scale
+    // c15.x (cac) / c16.x (default), and the world-shadow FLOOR c3.w
+    // (g_CSMSelfBias.w: `max shadow, c3.w`, cac line 46 / default line 45;
+    // sk83_na_m's dev compiles have no such row) in tintA.x.
+    //   cac_hair (fam 4): key = i_modulateColor1 c16 (rows_valid), Kajiya-
+    //     Kay spec color i_modulateColor2 c17 with power c11.w.
+    //   defaulthair (fam 5): key c10 (power w = rim-spec fresnel exponent),
+    //     back-rim light c15, fresnel exponent c9.z, key phong spec c11
+    //     (rgb, power w), rim phong spec c12 (rgb, power w), pre-fog
+    //     multiplier c9.y. rows_valid only uses c15 as a plausibility row;
+    //     the key is c10.
     const float amb = row(14u, 3) * 0.25f;
     d[2 * 4 + 3] = std::clamp(amb, 0.0f, 4.0f);
-    d[3] = std::clamp(row(fam == 4 ? 11u : 9u, fam == 4 ? 3u : 2u), 1.0f, 64.0f);
-    const uint32_t fres_r = fam == 4 ? 17u : 10u;
+    d[3] = std::clamp(row(fam == 4 ? 11u : 9u, fam == 4 ? 3u : 2u), 0.0f, 512.0f);
+    const uint32_t fres_r = fam == 4 ? 17u : 15u;
     for (int c = 0; c < 3; ++c) {
       d[13 * 4 + c] = std::clamp(row(fres_r, uint32_t(c)), 0.0f, 8.0f);
     }
     d[13 * 4 + 3] = std::clamp(row(fam == 4 ? 15u : 16u, 0), 0.0f, 4.0f);
+    d[12 * 4 + 0] = std::clamp(row(3u, 3), 0.0f, 1.0f);
+    if (fam == 5) {
+      for (int c = 0; c < 3; ++c) {
+        d[4 + c] = std::clamp(row(10u, uint32_t(c)), 0.0f, 64.0f);
+        d[3 * 4 + c] = std::clamp(row(11u, uint32_t(c)), 0.0f, 64.0f);
+        d[4 * 4 + c] = std::clamp(row(12u, uint32_t(c)), 0.0f, 64.0f);
+      }
+      d[3 * 4 + 3] = std::clamp(row(11u, 3), 0.0f, 512.0f);
+      d[4 * 4 + 3] = std::clamp(row(12u, 3), 0.0f, 512.0f);
+      const float mult = row(9u, 1);
+      d[5 * 4 + 0] = (mult > 0.0f && mult < 16.0f) ? mult : 1.0f;
+      d[5 * 4 + 1] = std::clamp(row(10u, 3), 0.0f, 512.0f);
+    }
     d[14 * 4 + 0] = 1.0f;
   }
   d[14 * 4 + 1] = float(fam);
@@ -5578,6 +5669,23 @@ void CaptureCharLighting(uint8_t* base, DrawItem& item) {
     const bool nis_layout = nk == 1 || ((row(13u, 1) != 0.0f || row(13u, 2) != 0.0f) &&
                                         row(22u, 3) != 0.0f);
     bias_r = nk == 2 ? 0u : (nis_layout ? 27u : (plus == 2u ? 34u : 31u));
+  }
+  // Static world-shadow FLOOR (g_CSMSelfBias.w) for fams 1/2: every retail
+  // gameplay / nis / editor compile does `max world, cN.w` before the min
+  // with the gated cascade (cac_cloth_defaultPS 97/99, cacstamp_shift 95,
+  // cacstamp_skin 100, defaultcharacter / character_skin 90: c8.w for the
+  // cac/cacstamp family, c31.w for defaultcharacter / character_skin; the
+  // editor _nisPS compiles keep c8 / c31 in retail). The skatepark compiles
+  // have no such floor. Without it a skater standing in a building's shadow
+  // lost the key light entirely (clothes and board far darker than the
+  // emulated frame, which keeps this fraction of the key). Carried in
+  // ch_amb.z, the slot the near-pedestrian branch uses for the same floor.
+  if (fam == 1 || fam == 2) {
+    const bool park = fam == 2 ? plus == 6u : plus == 2u;
+    if (!park) {
+      const float fl = row(fam == 2 ? 8u : 31u, 3);
+      d[2 * 4 + 2] = (fl > 0.0f && fl <= 1.0f) ? fl : 0.0f;
+    }
   }
   if (bias_r != 0) {
     const float bx = row(bias_r, 0);
@@ -6545,6 +6653,15 @@ int WorldPsKindOf(uint8_t* base, uint32_t obj) {
       hit = 5;  // flowingwater_defaultPS / flowingwateralpha_defaultPS
     } else if (main_pass && std::strstr(name, "\\advertisement_") != nullptr) {
       hit = 6;  // advertisement_defaultPS / _skateparkPS
+    } else if (main_pass && std::strstr(name, "environmentreflective_simple_") != nullptr) {
+      hit = 8;  // baseenvironmentreflective_simple: cube at tf7
+    } else if (main_pass && (std::strstr(name, "\\baseenvironmentreflective_") != nullptr ||
+                             std::strstr(name, "\\transparentbaseenvironmentreflective_") !=
+                                 nullptr)) {
+      hit = 7;  // cube at tf9
+    } else if (main_pass &&
+               std::strstr(name, "\\transparentenvironmentreflective_") != nullptr) {
+      hit = 9;  // cube at tf6
     }
   }
   m = {obj, hit};
@@ -9371,7 +9488,7 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
       w.seen = true;
     }
   }
-  if (isl != nullptr && (isl->reg & (kIslDecal | kIslTraffic | kIslHom | kIslFlow | kIslAd)) != 0) {
+  if (isl != nullptr && (isl->reg & kIslPerDraw) != 0) {
     // Per-draw game state for registered islands (IslandState::reg), taken
     // only while the matching main-pass pixel shader is bound: the decal
     // art binding (every decal[2]environment PS fetches the art at tf4),
@@ -9438,6 +9555,16 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
           std::memcpy(hs.c7, v + 5, sizeof(hs.c7));
           hs.seen = true;
         }
+      }
+    }
+    // Reflective world families: the cube this draw's PS samples (see
+    // RefCubeDrawState / DrawItem::ref_cube).
+    if (ps_kind >= 7 && ps_kind <= 9 && (isl->reg & kIslRefCube) != 0) {
+      const uint32_t tex = g_tex_slot[ps_kind == 7 ? 9 : (ps_kind == 8 ? 7 : 6)];
+      if (tex != 0) {
+        isl->refcube.tex = tex;
+        isl->refcube.normal = ps_kind == 7 ? g_tex_slot[8] : 0;
+        isl->refcube.seen = true;
       }
     }
     // flowingwater[alpha]: this draw's own material rows and colour map

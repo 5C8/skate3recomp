@@ -1297,8 +1297,17 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
       const int16_t ny = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 6)));
       n3[0] = nx / 32767.0f;
       n3[1] = ny / 32767.0f;
-      const float d = 1.0f - n3[0] * n3[0] - n3[1] * n3[1];
-      n3[2] = (sy > 0 ? 1.0f : -1.0f) * std::sqrt(d > 0.0f ? d : 0.0f);
+      // Every world VS clamps the xy length first (base/default/decal/
+      // reflective[_simple]/transparent...: `min r0.y, nn, c255.z` with
+      // c255.z = 0.999), so z never drops below sqrt(0.001) = 0.0316: a
+      // normal whose stored xy is unit (a facade facing +-X/+-Y) still
+      // carries a +-1.8 degree z tilt, signed by the unwrap's sign.y, which
+      // flips per UV island. Mirror glass shows it: without the clamp every
+      // pane of an X-facing facade reflected one continuous image, the game
+      // gives each island its own slightly yawed reflection (F10 pair
+      // 165813/165828: the per-pane flipped fronds / V shapes).
+      const float d = 1.0f - std::min(n3[0] * n3[0] + n3[1] * n3[1], 0.999f);
+      n3[2] = (sy > 0 ? 1.0f : -1.0f) * std::sqrt(d);
       // World-shading v2: the STORED tangent frame. These static meshes
       // never skin, so the blend-weight bytes are free: pack the mesh's
       // k_10_11_11 binormal (unorm-mapped) plus the unwrap sign.x tangent
@@ -1306,7 +1315,25 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
       // handedness; authoring decides per UV island whether the frame
       // follows a mirror, which derivative frames cannot know (the wooden
       // ramp panels banded light/dark per island without this).
-      if (!item.skinned && item.normal_fmt == 16) {
+      if (!item.skinned && item.tan_fmt == 16 &&
+          (item.env_family == 5 || item.env_family == 6 || item.env_family == 13)) {
+        // baseenvironmentreflective (+ its transparent twin): the VS input
+        // table is pos, uv0, uv1, usage-6 TANGENT (.vpo: 00206007); no
+        // usage-3 element is fetched. o2 = T, o3 = B = sign.x * cross(N, T)
+        // (VS 23-32), and the PS maps the NORMALIZED tangent-space normal
+        // as n.x * T + n.y * B + n.z * N (PS 31-40) before the cube
+        // reflection. Pack T with the tangent-stored sentinels (70 = +sign.x,
+        // 40 = -sign.x; KdAxes rebuilds B = +-cross(N, T)). The usage-3
+        // element packed below (with an empirical polarity) is not the
+        // game's frame for these shaders; reflections off it, and off the
+        // screen-space fallback, landed on the wrong cube texels.
+        float t3[3];
+        unpack_10_11_11(item.tangent_offset, t3);
+        const uint32_t packed = pk(t3[0]) | (pk(t3[1]) << 8) |
+                                (pk(t3[2]) << 16) |
+                                ((sx > 0 ? 70u : 40u) << 24);
+        std::memcpy(&dst[v * 14 + 7], &packed, 4);
+      } else if (!item.skinned && item.normal_fmt == 16) {
         float b3[3];
         unpack_10_11_11(item.normal_offset, b3);
         // w byte is a three-state presence sentinel: 0 = no stored frame
@@ -1343,23 +1370,6 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
       // the decal-art uv3 slot, so the stored binormal rides it: x offset
       // by +16 (z >= 0) or +32 (z < 0) as the presence marker, y raw, z
       // rebuilt from the unit length (see scene.hlsl vs_main).
-      if (item.char_family == 4 && item.tb_fmt == 16) {
-        // cac_hair: the PS's Kajiya-Kay highlight runs along the VS-skinned
-        // usage-6 TANGENT (cac_hair_defaultVS o2; the strand direction on
-        // hair cards). Hair never samples uv3, so the tangent rides it with
-        // the vehicle-binormal encoding (x +16 / +32 by z sign, y raw, z
-        // rebuilt); the VS skins it with the normal's bone rows. The
-        // screen-space U axis the port used instead ran ACROSS the strands:
-        // sqrt(1 - (H.T)^2) pinned near 1 and the highlight lit every
-        // strand, the hair ~1.3x (gamma) brighter than the emulated frame.
-        float t3[3];
-        unpack_10_11_11(item.tangent_offset, t3);
-        const float tl = std::sqrt(t3[0] * t3[0] + t3[1] * t3[1] + t3[2] * t3[2]);
-        if (tl > 1e-4f) {
-          dst[v * 14 + 12] = t3[0] / tl + (t3[2] < 0.0f ? 32.0f : 16.0f);
-          dst[v * 14 + 13] = t3[1] / tl;
-        }
-      }
       if ((item.char_family == 6 || item.char_family == 7) && item.tb_fmt == 16) {
         float b3[3];
         unpack_10_11_11(item.binormal_offset, b3);
@@ -1447,6 +1457,46 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
         const uint32_t packed = pk(b3[0]) | (pk(b3[1]) << 8) |
                                 (pk(b3[2]) << 16) | (200u << 24);
         std::memcpy(&dst[v * 14 + 7], &packed, 4);
+      }
+    }
+    if ((item.char_family == 4 || item.char_family == 5) && item.tb_fmt == 16 &&
+        !item.water_flowing && item.env_family == 0) {
+      // Hair (cac_hair / defaulthair, gameplay compiles): both VSes fetch
+      // TANGENT (usage 6) and BINORMAL (usage 7) and never the usage-3
+      // normal (.vpo input table: pos, uv0, uv1, usage 6, usage 7, indices,
+      // weights). They output o1 = cross(T, B) (ucode 46-50), o2 = T,
+      // o3 = B; the PS builds N' = nz * o1 + map.y * B + map.w * T and runs
+      // the Kajiya-Kay highlight along o2. So the normal is cross(T, B)
+      // whether or not the mesh also stores a normal (a stored normal that
+      // disagrees with the pair lit the hair differently), and the strand
+      // tangent must exist for every hair mesh: the old pack only ran when
+      // a usage-3 normal was present, and without it the PS fell back to
+      // the screen U axis, which runs ACROSS the strands (sqrt(1 - (H.T)^2)
+      // pinned near 1: every strand highlit, flat bright hair).
+      // T rides uv3 RAW (x + 16 as the presence marker, y) and the free
+      // fourth blend-weight byte (z, unorm; the hair VSes use implied
+      // skinning, w3 = 1 - sum(xyz), so that byte is never read). Raw
+      // values interpolate exactly like the game's o2; the old +16/+32
+      // z-sign encoding interpolated through garbage on any triangle whose
+      // corners disagree on the sign of z.
+      float t3[3], b3[3];
+      unpack_10_11_11(item.tangent_offset, t3);
+      unpack_10_11_11(item.binormal_offset, b3);
+      const float c3[3] = {t3[1] * b3[2] - t3[2] * b3[1], t3[2] * b3[0] - t3[0] * b3[2],
+                           t3[0] * b3[1] - t3[1] * b3[0]};
+      if (c3[0] * c3[0] + c3[1] * c3[1] + c3[2] * c3[2] > 1e-8f) {
+        n3[0] = c3[0];
+        n3[1] = c3[1];
+        n3[2] = c3[2];
+      }
+      const float tl = std::sqrt(t3[0] * t3[0] + t3[1] * t3[1] + t3[2] * t3[2]);
+      if (tl > 1e-4f) {
+        dst[v * 14 + 12] = t3[0] / tl + 16.0f;
+        dst[v * 14 + 13] = t3[1] / tl;
+        uint32_t w;
+        std::memcpy(&w, &dst[v * 14 + 7], 4);
+        w = (w & 0x00FFFFFFu) | (pk(t3[2] / tl) << 24);
+        std::memcpy(&dst[v * 14 + 7], &w, 4);
       }
     }
     dst[v * 14 + 9] = n3[0];
@@ -14400,15 +14450,21 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // material's environment channel (see g_ocean_tf7).
     const bool ocean_bound_cube =
         item.water && item.water_ocean == 1 && scene.ocean_tf7 != 0;
-    const uint32_t env_cube_ptr =
-        ocean_bound_cube ? scene.ocean_tf7 : item.water_env;
+    // Reflective world families likewise take the cube the game bound for
+    // the item's own main-pass draw (DrawItem::ref_cube) when observed.
+    const bool refl_bound_cube =
+        item.ref_cube != 0 &&
+        ((item.env_family >= 5 && item.env_family <= 6) || item.env_family == 13);
+    const uint32_t env_cube_ptr = ocean_bound_cube  ? scene.ocean_tf7
+                                  : refl_bound_cube ? item.ref_cube
+                                                    : item.water_env;
     if ((item.water || item.char_family >= 6 ||
          (item.env_family >= 5 && item.env_family <= 6) ||
          item.env_family == 13) &&
         env_cube_ptr != 0) {
       auto cit = g_r.cube_textures.find(env_cube_ptr);
       if (cit == g_r.cube_textures.end()) {
-        if (!item.retained || ocean_bound_cube) {
+        if (!item.retained || ocean_bound_cube || refl_bound_cube) {
           EnqueueCubeMiss(env_cube_ptr);
         }
       } else if (cit->second.valid) {
@@ -14606,7 +14662,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       if (item.water_normal == 0) gate |= 2;
       if (spec_bound && (!decal_tex->valid || decal_tex->srv_mips == 0)) gate |= 4;
       if (gate == 0) {
-        const GuestTexture* nrm = resolve_texture(item.water_normal, 3);
+        // The normal map the game bound for this item's lit pass (tf8,
+        // DrawItem::ref_normal) when observed, else the material channel.
+        const GuestTexture* nrm =
+            resolve_texture(item.ref_normal != 0 ? item.ref_normal : item.water_normal, 3);
         if (nrm == &g_r.white) {
           gate |= 8;
         } else {
