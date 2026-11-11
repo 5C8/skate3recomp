@@ -1,5 +1,10 @@
 # Release notes
 
+## 1.0.9
+
+- **Linux:** Schedule GTK redraws on the UI thread to address the gameplay crash reported in [#7](https://github.com/5C8/skate3recomp/issues/7).
+- **SDK revision:** `e948aee93a6e245d157ffd63ffa16d7fde03a145` ([source](https://github.com/5C8/rexglue-skate3/commit/e948aee93a6e245d157ffd63ffa16d7fde03a145)), used for both Linux and Windows builds.
+
 ## 1.0.8
 
 - **Glass reflections:** reflective glass facades

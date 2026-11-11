@@ -1,5 +1,9 @@
 # Building the retail project
 
+Skate3Recomp 1.0.9 uses SDK commit
+[`e948aee93a6e245d157ffd63ffa16d7fde03a145`](https://github.com/5C8/rexglue-skate3/commit/e948aee93a6e245d157ffd63ffa16d7fde03a145),
+which includes the Linux GTK redraw fix. Use that revision to reproduce this release.
+
 Use SDK 0.8.2.95 or newer from the matching [5C8 ReXGlue SDK](https://github.com/5C8/rexglue-skate3/releases),
 not an unrelated upstream SDK build. The initial Windows snapshot uses Clang
 23.1.0, CMake 3.25+, Ninja, the Visual Studio C++ build tools and a Windows SDK.
@@ -57,7 +61,9 @@ backend (macOS through MoltenVK). Point `REXSDK_DIR` at a recursive clone of the
 matching SDK tag:
 
 ```bash
-git clone --recursive --branch v0.8.2.95-skate3.20261029 https://github.com/5C8/rexglue-skate3 ~/dev/rexglue-skate3
+git clone --recursive https://github.com/5C8/rexglue-skate3 ~/dev/rexglue-skate3
+git -C ~/dev/rexglue-skate3 checkout e948aee93a6e245d157ffd63ffa16d7fde03a145
+git -C ~/dev/rexglue-skate3 submodule update --init --recursive
 ```
 
 On Linux (Ubuntu 24.04 shown), install clang/lld 20, CMake, Ninja, Python 3
