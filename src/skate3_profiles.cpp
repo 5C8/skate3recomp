@@ -1060,7 +1060,10 @@ bool SignInAtBoot(rex::ui::WindowedAppContext& app_context, rex::ui::Window* win
     REXLOG_INFO("profiles: signed in '{}' automatically", Selected(store)->gamertag);
     return true;
   }
-  if (drawer == nullptr) {
+  // Unattended runs (the demo path drives the boot to gameplay) never wait on the picker.
+  const bool unattended = rex::cvar::GetFlagInfo("skate3_demo_path") != nullptr &&
+                          rex::cvar::Query<bool>("skate3_demo_path");
+  if (drawer == nullptr || unattended) {
     // No UI to ask with: sign in the last (or first) profile.
     if (Selected(store) == nullptr && !store.profiles.empty()) {
       store.selected = store.profiles.front().id;

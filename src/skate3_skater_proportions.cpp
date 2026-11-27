@@ -507,6 +507,9 @@ bool Build(uint8_t* base, uint32_t entity, SkaterState& s) {
     for (const auto& leg : rig.legs)
       rig.feet = rig.feet && rig.parents[leg[1]] == leg[0] && rig.parents[leg[2]] == leg[1] &&
                  rig.parents[leg[0]] >= 0;
+    // the foot planting works in the root's frame (the ground under him); a skeleton whose hips
+    // are the root (cutscene rigs) has no such frame - bone offsets only
+    rig.feet = rig.feet && rig.hips >= 0 && rig.parents[rig.hips] >= 0;
     REXLOG_INFO("skater-proportions: entity={:08X} hips={} left={},{},{} right={},{},{} -> feet {}", entity,
                 rig.hips, rig.legs[0][0], rig.legs[0][1], rig.legs[0][2], rig.legs[1][0], rig.legs[1][1],
                 rig.legs[1][2], rig.feet ? "planted" : "NOT planted (leg bones not found)");
@@ -610,7 +613,18 @@ bool Build(uint8_t* base, uint32_t entity, SkaterState& s) {
   std::vector<Mat> rest(nb, identity), rf(nb, identity);
   for (int i : s.hier.order) {
     const int p = s.hier.parents[i];
-    if (p < 0) continue;                      // the root (Trajectory): the origin, never bound
+    if (p < 0) {
+      // the root (Trajectory): the origin, never bound. A skeleton without one (the cutscene rigs:
+      // Hips is the root, the board root under it) has the hips as a root: its rest place is its
+      // bind / the reference's - at the origin, everything under it measured its whole world
+      // position as an own offset (retail skaters' spine and legs moved ~1 m in cutscenes).
+      const bool ref_root = map[i] < 0 || R.parents[map[i]] < 0;
+      if (!ref_root) {
+        rf[i] = ew[i];
+        rest[i] = have[i] ? bind[i] : ew[i];
+      }
+      continue;
+    }
     rf[i] = Mul(local_of(i), rf[p]);
     rest[i] = have[i] ? bind[i] : Mul(local_of(i), rest[p]);
   }
@@ -958,7 +972,9 @@ void skate3::skater_proportions::BeforeBoneTransforms(PPCContext& ctx, uint8_t* 
       Mat pinv;
       if (!InverseAffine(w[p], pinv)) return;
       Mat l = Mul(w[i], pinv);
-      if (s.hier.parents[p] >= 0) {           // the hips' own offset is the placement step's job
+      // the hips' own offset (under the Trajectory root) is the placement step's job; where the
+      // hips are the root themselves (cutscene rigs) the bones under them get theirs
+      if (s.hier.parents[p] >= 0 || p == s.rig.hips) {
         const P::V3& d = s.rig.delta[i];
         l[12] += d[0];
         l[13] += d[1];

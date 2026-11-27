@@ -98,6 +98,8 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_freecam_capture_input);
 
 REXCVAR_DEFINE_STRING(skate3_dlc_root, "", "Skate 3",
                       "Directory containing Skate 3 DLC package files");
+REXCVAR_DEFINE_BOOL(skate3_character_load_trace, false, "Skate 3",
+                    "Trace guest character fallbacks and allocation attempts");
 REXCVAR_DEFINE_BOOL(skate3_auto_install_dlc, true, "Skate 3",
                     "Install DLC package files found in configured DLC folders");
 REXCVAR_DEFINE_BOOL(skate3_ultrawide, false, "Skate 3",
@@ -813,6 +815,9 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
 }
 
 void Skate3BaseApp::OnPostSetup() {
+  if (REXCVAR_GET(skate3_character_load_trace)) {
+    REXLOG_INFO("character-load: trace enabled");
+  }
   skate3::shader_disasm::RunIfRequested();
   skate3::SyncServerHostOverrides(OnlineServerHosts(), user_settings_path_);
   ApplySelectedProfileToRuntime();

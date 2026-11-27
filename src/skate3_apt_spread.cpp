@@ -398,6 +398,7 @@ extern "C" REX_FUNC(rex_PushMatrices_82E82F88) {
 // replayed from a cached render list, goes through here. A stamped entry
 // baked with another k (window resized since the list was built) is moved
 // to the current k in place, so the cache heals on its first replay.
+namespace sk83_render_game { void AptLegacyTransform(PPCContext& ctx, uint8_t* base); }   // native/skate3_native_render_game.cpp
 extern "C" REX_FUNC(rex_CallLegacyTransformCallbacks_82E85038) {
   const uint32_t entry = ctx.r3.u32;
   const uint32_t root = InGuestHeap(entry) ? LoadU32(base, entry + kStampRoot) : 0;
@@ -415,7 +416,7 @@ extern "C" REX_FUNC(rex_CallLegacyTransformCallbacks_82E85038) {
       RecordLeaf(root, x - u * (k - 1.0f));
     }
   }
-  __imp__rex_CallLegacyTransformCallbacks_82E85038(ctx, base);
+  sk83_render_game::AptLegacyTransform(ctx, base);   // decomp or recompiled
 }
 
 // ---- Online nametags (world-projected cFont text, outside APT) ----

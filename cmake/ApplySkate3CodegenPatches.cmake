@@ -138,3 +138,5 @@ endforeach()
 
 # Keep name-only metadata out of SDK function-boundary analysis.
 include("${CMAKE_CURRENT_LIST_DIR}/ApplySkate3DeferredNames.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/TraceSkate3CharacterLoad.cmake")
+skate3_patch_character_load_trace(${_skate3_recomp_files})

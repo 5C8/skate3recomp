@@ -649,6 +649,11 @@ inline FlatSet<uint64_t> g_frame_ws_keys;
 // from the native map (g_palette_mutex).
 inline std::unordered_map<uint64_t, std::vector<DrawEntry>> g_frame_ws_entries;
 inline uint32_t g_frame_ws_draws = 0;
+// World-shade pass bracket (sub_827FD170 hook): depth > 0 inside the pass, confirmed once
+// OnDrawDone recognised the pass's first (really drawn) mesh; meshes recorded directly.
+inline int g_ws_pass_depth = 0;
+inline bool g_ws_pass_confirmed = false;
+inline std::atomic<uint64_t> g_ws_direct_meshes{0};
 // The MeshContexts the game's world-shade pass renders this frame (see
 // OnWorldShadowRender). Guarded by g_palette_mutex.
 inline std::vector<uint32_t> g_frame_ws_ctxs;
@@ -727,6 +732,15 @@ inline std::unordered_multimap<uint64_t, CharDrawRows> g_frame_char_draw_rows;
 // the engine binds the streamed art via the fetch constants at draw time.
 // Guarded by g_palette_mutex; cleared at the end of BuildFrameScene.
 inline FlatMap<uint64_t, std::array<uint32_t, 12>> g_frame_draw_fetch;
+// Last main-pass fetch words per draw key with the guest frame they were seen in (draw_fetch_sticky):
+// serves AdoptDrawFetchOverrides on frames where the item's guest draw was skipped (static skip set),
+// so adopted art does not fall back to the channel texture between its refresh-phase draws.
+// Guarded by g_palette_mutex.
+struct StickyDrawFetch {
+  std::array<uint32_t, 12> w;
+  uint64_t frame;
+};
+inline FlatMap<uint64_t, StickyDrawFetch> g_sticky_draw_fetch;
 // One game draw's identity: its buffers plus the island's base vertex and
 // start index (the DrawIndexedVertices r5/r6 = DrawEntry fields). Buffers
 // alone are NOT a mesh identity: the game packs several meshes with

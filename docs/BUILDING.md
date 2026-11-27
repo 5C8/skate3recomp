@@ -1,8 +1,8 @@
 # Building the retail project
 
-Skate3Recomp 1.0.9 uses SDK commit
-[`e948aee93a6e245d157ffd63ffa16d7fde03a145`](https://github.com/5C8/rexglue-skate3/commit/e948aee93a6e245d157ffd63ffa16d7fde03a145),
-which includes the Linux GTK redraw fix. Use that revision to reproduce this release.
+Skate3Recomp 1.1.0 uses SDK commit
+[`942046b66c098113fb578422f914b121e721f7c4`](https://github.com/5C8/rexglue-skate3/commit/942046b66c098113fb578422f914b121e721f7c4),
+which includes the Vulkan inter-frames and the AMD Direct3D 12 hang fix. Use that revision to reproduce this release.
 
 Use SDK 0.8.2.95 or newer from the matching [5C8 ReXGlue SDK](https://github.com/5C8/rexglue-skate3/releases),
 not an unrelated upstream SDK build. The initial Windows snapshot uses Clang
@@ -62,7 +62,7 @@ matching SDK tag:
 
 ```bash
 git clone --recursive https://github.com/5C8/rexglue-skate3 ~/dev/rexglue-skate3
-git -C ~/dev/rexglue-skate3 checkout e948aee93a6e245d157ffd63ffa16d7fde03a145
+git -C ~/dev/rexglue-skate3 checkout 942046b66c098113fb578422f914b121e721f7c4
 git -C ~/dev/rexglue-skate3 submodule update --init --recursive
 ```
 

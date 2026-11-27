@@ -52,6 +52,8 @@ REXCVAR_DEFINE_INT32(skate3_native_render_log_interval, 0, "Skate 3",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_perf_log);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_occlusion_cull_guest);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_ws_direct);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_ws_direct_verify);
 REXCVAR_DEFINE_DOUBLE(skate3_guest_fps_cap, 0.0, "Skate 3",
                       "Pace the guest render loop to this frame rate (0 = uncapped). The "
                       "guest produces frames at irregular 2-9 ms intervals; the display "
@@ -186,18 +188,23 @@ OcclDispatchFilter g_occl_filter;
 // Compacts entries[first..first+count) in place, dropping culled ctxs, and
 // returns the kept count. Returns `count` unchanged (nothing saved) when
 // filtering is off, stale, empty, or nothing matched.
-uint32_t FilterSceneDrawList(uint8_t* base, uint32_t sort_vec, uint32_t first,
+uint32_t FilterSceneDrawList(uint8_t* base, uint32_t view, uint32_t sort_vec, uint32_t first,
                              uint32_t count) {
   OcclDispatchFilter& f = g_occl_filter;
-  if (f.active || count == 0 || count > 100000 ||
-      !REXCVAR_GET(skate3_native_render_scene_occlusion_cull_guest)) {
+  if (f.active || count == 0 || count > 100000) {
     return count;
   }
-  if (f.stamp != g_frame_index) {
+  const bool occl = REXCVAR_GET(skate3_native_render_scene_occlusion_cull_guest);
+  if (occl && f.stamp != g_frame_index) {
     f.stamp = g_frame_index;
     skate3::native_scene::CopyOcclusionCulledCtxs(f.ctxs);
   }
-  if (f.ctxs.empty()) {
+  // Static skip: plain static world items fully served by the native cache.
+  uint32_t phase_bit = 0;
+  const skate3::native_scene::StaticSkipSet* ss =
+      skate3::native_scene::StaticSkipFor(view, sort_vec, &phase_bit);
+  const bool use_occl = occl && !f.ctxs.empty();
+  if (!use_occl && ss == nullptr) {
     return count;
   }
   skate3::native_scene::GuestReadRecoveryScope guest_read_recovery(base);
@@ -209,20 +216,34 @@ uint32_t FilterSceneDrawList(uint8_t* base, uint32_t sort_vec, uint32_t first,
   f.saved.assign(base + seg, base + seg + size_t(count) * 8);
   uint32_t kept = 0;
   uint32_t skipped = 0;
+  uint32_t static_skipped = 0;
   for (uint32_t i = 0; i < count; ++i) {
     const uint8_t* src = f.saved.data() + size_t(i) * 8;
     uint32_t ctx_be;
     std::memcpy(&ctx_be, src + 4, 4);
     const uint32_t mesh_context = __builtin_bswap32(ctx_be);
-    if (mesh_context != 0 &&
+    if (mesh_context != 0 && use_occl &&
         std::binary_search(f.ctxs.begin(), f.ctxs.end(), mesh_context)) {
       ++skipped;
       continue;
+    }
+    if (mesh_context != 0 && ss != nullptr) {
+      const auto it = std::lower_bound(ss->ctxs.begin(), ss->ctxs.end(), mesh_context);
+      if (it != ss->ctxs.end() && *it == mesh_context &&
+          (ss->masks[size_t(it - ss->ctxs.begin())] & phase_bit) == 0 &&
+          REX_LOAD_U32(mesh_context + 0x4C) == 0) {  // no game render test (retail +0x4C; dev +0x40)
+        ++skipped;
+        ++static_skipped;
+        continue;
+      }
     }
     if (kept != i) {
       std::memcpy(base + seg + size_t(kept) * 8, src, 8);
     }
     ++kept;
+  }
+  if (ss != nullptr) {
+    skate3::native_scene::AddGuestStaticSkipped(static_skipped, count);
   }
   if (skipped == 0) {
     f.saved.clear();
@@ -231,7 +252,7 @@ uint32_t FilterSceneDrawList(uint8_t* base, uint32_t sort_vec, uint32_t first,
   f.active = true;
   f.saved_addr = seg;
   f.saved_bytes = count * 8;
-  skate3::native_scene::AddGuestOcclSkipped(skipped);
+  skate3::native_scene::AddGuestOcclSkipped(skipped - static_skipped);
   return kept;
 }
 
@@ -530,7 +551,22 @@ extern "C" REX_FUNC(sub_827FAB50) {
 // sub_827FAF50(r3 = SceneRenderView*, r4 = eastl vector of 8-byte
 // {sort_key, MeshContext*} entries, r5 = first, r6 = count). Called from
 // SceneRenderView::Render (82 7FB158) for each of the view's key lists.
+namespace sk83_render_game {   // native/skate3_native_render_game.cpp (decomp or recompiled)
+void SetIndices(PPCContext& ctx, uint8_t* base);
+void SetVertexShader(PPCContext& ctx, uint8_t* base);
+void SetPixelShader(PPCContext& ctx, uint8_t* base);
+void SetPendingRenderStates(PPCContext& ctx, uint8_t* base);
+void SetViewport(PPCContext& ctx, uint8_t* base);
+void SetTexture(PPCContext& ctx, uint8_t* base);
+void RenderMeshes(PPCContext& ctx, uint8_t* base);
+void SetStreamSource(PPCContext& ctx, uint8_t* base);
+}
+namespace sk83_replay {   // skate3_guest_replay.cpp
+void CapturePoint(uint32_t fn, PPCContext& ctx, uint8_t* base);
+void MaybeReplay(uint8_t* base);
+}
 extern "C" REX_FUNC(sub_827FAF50) {
+  sk83_replay::CapturePoint(0x827FAF50, ctx, base);
   struct ListScope {
     uint32_t prev = skate3::native_scene::g_dispatch_list_offset;
     explicit ListScope(uint32_t off) { skate3::native_scene::g_dispatch_list_offset = off; }
@@ -544,18 +580,18 @@ extern "C" REX_FUNC(sub_827FAF50) {
     // hidden. The segment is restored after the call (the list object
     // outlives this dispatch).
     const uint32_t kept = skate3::native_render::FilterSceneDrawList(
-        base, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32);
+        base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32);
     if (kept != ctx.r6.u32) {
       ctx.r6.u64 = kept;
       {
-    __imp__sub_827FAF50(ctx, base);
+    sk83_render_game::RenderMeshes(ctx, base);   // decomp or recompiled
   }
       skate3::native_render::RestoreSceneDrawList(base);
       return;
     }
   }
   {
-    __imp__sub_827FAF50(ctx, base);
+    sk83_render_game::RenderMeshes(ctx, base);   // decomp or recompiled
   }
 }
 
@@ -565,16 +601,76 @@ extern "C" REX_FUNC(sub_827FAF50) {
 // including geometry the camera view culled. Retail inlines RenderShadowMesh
 // (SetVertexShader / SetIndices / SetStreamSource / DrawIndexedVertices per
 // list entry); same prologue, pixel-shader reset and list walk as the dev one.
+// ws_direct (ported from sk83_na_m): the guest draws the pass's FIRST mesh only (the list end at
+// +20204 is pulled in to begin + 4), which lets OnDrawDone recognise the pass; the remaining
+// meshes are recorded straight from their MeshContexts (WorldShadeMeshDirect) and the list is
+// restored. Whatever cannot be recorded (unconfirmed pass, unreadable mesh) is drawn by a second
+// guest pass over the rest of the list.
 extern "C" REX_FUNC(sub_827FD170) {
-  if (skate3::native_render::Enabled()) {
-    skate3::native_scene::OnWorldShadowRender(base, ctx.r3.u32);
+  if (!skate3::native_render::Enabled()) {
+    __imp__sub_827FD170(ctx, base);
+    return;
   }
+  namespace ns = skate3::native_scene;
+  const uint32_t view = ctx.r3.u32;
+  ns::OnWorldShadowRender(base, view);
+  const uint32_t begin = REX_LOAD_U32(view + 20200), end = REX_LOAD_U32(view + 20204);
+  const uint32_t n = end > begin && end - begin < 0x40000 ? (end - begin) / 4 : 0;
+  if (REXCVAR_GET(skate3_native_render_scene_ws_direct_verify) && n > 1) {
+    static std::atomic<uint64_t> s_meshes{0}, s_bad{0}, s_draw_bad{0}, s_passes{0};
+    std::vector<uint64_t> keys(n);
+    std::vector<std::vector<skate3::native_scene::DrawEntry>> ents(n);
+    std::vector<bool> ok(n);
+    uint32_t total = 0;
+    bool all_ok = true;
+    for (uint32_t i = 0; i < n; ++i) {
+      uint32_t d = 0;
+      ok[i] = ns::WorldShadeMeshCompute(base, REX_LOAD_U32(begin + i * 4), &keys[i], ents[i], &d);
+      all_ok = all_ok && ok[i];
+      total += d;
+    }
+    const uint32_t d0 = ns::WorldShadeFrameDraws();
+    __imp__sub_827FD170(ctx, base);
+    const uint32_t d1 = ns::WorldShadeFrameDraws();
+    for (uint32_t i = 0; i < n; ++i) {
+      ++s_meshes;
+      if (ok[i] && !ns::WorldShadeMeshInFrame(keys[i], ents[i])) ++s_bad;
+    }
+    if (all_ok && d1 - d0 != total) ++s_draw_bad;
+    if ((++s_passes & 1023) == 0) {
+      REXLOG_INFO("ws_direct verify: {} passes, {} meshes, {} not matching the hook's records, {} passes "
+                  "with a different draw count",
+                  s_passes.load(), s_meshes.load(), s_bad.load(), s_draw_bad.load());
+    }
+    return;
+  }
+  if (!REXCVAR_GET(skate3_native_render_scene_ws_direct) || n < 2) {
+    __imp__sub_827FD170(ctx, base);
+    return;
+  }
+  REX_STORE_U32(view + 20204, begin + 4);
+  ns::BeginWorldShadowPass();
   __imp__sub_827FD170(ctx, base);
+  REX_STORE_U32(view + 20204, end);
+  uint32_t i = 1;
+  if (ns::WorldShadowPassConfirmed()) {
+    for (; i < n; ++i) {
+      if (!ns::WorldShadeMeshDirect(base, REX_LOAD_U32(begin + i * 4))) break;
+    }
+  }
+  ns::EndWorldShadowPass();
+  if (i < n) {
+    REX_STORE_U32(view + 20200, begin + i * 4);
+    ctx.r3.u64 = view;
+    __imp__sub_827FD170(ctx, base);
+    REX_STORE_U32(view + 20200, begin);
+  }
 }
 
 
 // Guest D3D Swap: frame boundary.
 extern "C" REX_FUNC(sub_82B82E08) {
+  sk83_replay::MaybeReplay(base);
   if (skate3::native_render::Enabled()) {
     skate3::native_render::OnFrameEnd(base);
   }
@@ -1349,7 +1445,7 @@ extern "C" REX_FUNC(rex_D3DDevice_SetIndices_82B79190) {
     }
   }
   {
-    __imp__rex_D3DDevice_SetIndices_82B79190(ctx, base);
+    sk83_render_game::SetIndices(ctx, base);   // decomp or recompiled
   }
 }
 
@@ -1392,7 +1488,7 @@ extern "C" REX_FUNC(rex_D3DDevice_SetStreamSource_82B78FF0) {
                                             ctx.r6.u32);
   }
   {
-    __imp__rex_D3DDevice_SetStreamSource_82B78FF0(ctx, base);
+    sk83_render_game::SetStreamSource(ctx, base);   // decomp or recompiled
   }
 }
 
@@ -1572,7 +1668,7 @@ extern "C" REX_FUNC(rex_D3DDevice_SetVertexShader_82B7F408) {
     }
   }
   {
-    __imp__rex_D3DDevice_SetVertexShader_82B7F408(ctx, base);
+    sk83_render_game::SetVertexShader(ctx, base);   // decomp or recompiled
   }
 }
 
@@ -1585,7 +1681,7 @@ extern "C" REX_FUNC(rex_D3DDevice_SetPixelShader_82B7F150) {
     }
   }
   {
-    __imp__rex_D3DDevice_SetPixelShader_82B7F150(ctx, base);
+    sk83_render_game::SetPixelShader(ctx, base);   // decomp or recompiled
   }
 }
 
@@ -1598,7 +1694,7 @@ extern "C" REX_FUNC(rex_D3D_SetPending_RenderStates_YAXPAVCDevice_1_KKPAX_Z_82B8
     }
   }
   {
-    __imp__rex_D3D_SetPending_RenderStates_YAXPAVCDevice_1_KKPAX_Z_82B83C48(ctx, base);
+    sk83_render_game::SetPendingRenderStates(ctx, base);   // decomp or recompiled
   }
 }
 
@@ -1624,7 +1720,7 @@ extern "C" REX_FUNC(rex_D3D_SetViewport_YAXPAUD3DDevice_MMMMMMK_Z_82B769C0) {
     }
   }
   {
-    __imp__rex_D3D_SetViewport_YAXPAUD3DDevice_MMMMMMK_Z_82B769C0(ctx, base);
+    sk83_render_game::SetViewport(ctx, base);   // decomp or recompiled
   }
 }
 
@@ -1712,5 +1808,5 @@ extern "C" REX_FUNC(rex_D3DDevice_SetTexture_82B82478) {
   if (skate3::native_render::Enabled()) {
     skate3::native_scene::OnSetTexture(ctx.r4.u32, ctx.r5.u32);
   }
-  __imp__rex_D3DDevice_SetTexture_82B82478(ctx, base);
+  sk83_render_game::SetTexture(ctx, base);   // decomp or recompiled
 }

@@ -696,6 +696,10 @@ struct FrameScene {
   // items were posed at (the smoother's g_smooth_play); 0 = not smoothed.
   // DIAGNOSTIC: the pace recorder compares it against present times.
   double play_time = 0.0;
+  // The smoother's playback point had run past its newest pose (a sim frame
+  // arrived after it was due): this scene's motion is held. Smoothness
+  // monitor cause attribution.
+  bool smooth_held = false;
   // Native reproduction of a PhotoEffects portrait pass (see PhotoJob):
   // render only `items` with this camera over clear_color, no post, into
   // the 1152x640 photo target.
@@ -1207,6 +1211,39 @@ inline std::atomic<uint32_t> g_main_scene_view{0};
 // drawing the world (a rendered frame within 250 ms), and `view` the main
 // camera view. Counts the skips for the perf line. Guest render thread.
 bool SkipGuestZPrepass(uint32_t view);
+// A native (non-portrait) frame rendered within the last 250 ms, i.e. the
+// native renderer is the one drawing the world.
+bool NativeWorldFresh();
+// World-shade pass direct recording (skate3_native_render_scene_ws_direct); see
+// WorldShadeMeshDirect in skate3_native_scene.cpp.
+void BeginWorldShadowPass();
+void EndWorldShadowPass();
+bool WorldShadowPassConfirmed();
+bool WorldShadeMeshCompute(uint8_t* base, uint32_t mc, uint64_t* key, std::vector<DrawEntry>& ents,
+                           uint32_t* draws);
+bool WorldShadeMeshDirect(uint8_t* base, uint32_t mc);
+bool WorldShadeMeshInFrame(uint64_t key, const std::vector<DrawEntry>& ents);
+uint32_t WorldShadeFrameDraws();
+// Guest-side static dispatch skip (skate3_native_render_scene_skip_guest_static):
+// MeshContexts of plain static world items the last BuildFrameScene built
+// completely from its own caches, so the game's per-draw material setup,
+// D3D calls and our draw hook for them produce nothing the native renderer
+// needs. ctxs sorted ascending; masks[i] = bit p set when one of the item's
+// islands takes its staggered render-state refresh on frames with
+// (g_guest_frame + p) % 32 == 0 (the hook must see the draw then).
+struct StaticSkipSet {
+  std::vector<uint32_t> ctxs;
+  std::vector<uint32_t> masks;
+  // Persist-only members (sorted): host-persistent, still drawn by the guest.
+  std::vector<uint32_t> persist_only;
+  uint32_t view = 0;
+  uint64_t frame = 0;
+};
+// The set for this dispatch, or nullptr when it does not apply (cvar off,
+// native scene not drawing, not the main view's opaque list, stale).
+// *phase_bit receives the current frame's refresh bit. Guest render thread.
+const StaticSkipSet* StaticSkipFor(uint32_t view, uint32_t sort_vec, uint32_t* phase_bit);
+void AddGuestStaticSkipped(uint32_t skipped, uint32_t considered);
 // The sort list (offset into its SceneRenderView) the guest draw-list
 // dispatcher is drawing right now, 0 outside a dispatch (draws-by-pass
 // diagnostic). Guest render thread only.

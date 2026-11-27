@@ -10391,6 +10391,16 @@ void AddGuestOcclSkipped(uint32_t n) {
   g_occl_guest_skipped.fetch_add(n, std::memory_order_relaxed);
 }
 
+bool NativeWorldFresh() {
+  // g_occl_pub_ms is stamped by every rendered (non-portrait) native frame:
+  // stale = the native renderer is not drawing the world (loading, boot
+  // frontend), so the emulated frame may be the one on screen.
+  const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+  return now_ms - g_occl_pub_ms.load(std::memory_order_relaxed) <= 250;
+}
+
 bool SkipGuestZPrepass(uint32_t view) {
   if (!REXCVAR_GET(skate3_native_render_scene_skip_guest_zprepass) || !SceneEnabled() ||
       view == 0 || view != g_main_scene_view.load(std::memory_order_relaxed)) {
@@ -10518,6 +10528,21 @@ struct InterFrameState {
   // frame came early or late).
   double lat = 0.0;
   bool lat_valid = false;
+  // MEASURED lat (see InterFrameFitLat): per paced present, the age of the
+  // newest scene at display (`need`) and the prev->cur content span. A
+  // present clamps late when lat < need (held: no newer content) and early
+  // when lat > need + span (before prev: only two scenes are kept). lat is
+  // the value minimizing the summed clamp error over the window: the old
+  // mean-age + 1 ms margin clamped late on ~10% of presents (step error p95
+  // 25-35%, measured 2026-11-14).
+  struct LatSample {
+    float need, span, extra;
+  };
+  std::vector<LatSample> lat_samples;  // ring
+  size_t lat_head = 0;
+  double lat_opt = 0.0;
+  double lat_fit_next = 0.0;
+  double lat_last_t = 0.0;
   double content_dt = 0.0;  // EMA of the scenes' content intervals
   // Render-thread cost of one present (RenderScene, EMA seconds): inter-
   // frames are spaced at least this far apart and never started when they
@@ -10542,6 +10567,9 @@ struct InterFrameState {
   // Planned display time of the present being rendered (steady_clock s,
   // 0 = none: hand over at once).
   double present_at = 0.0;
+  // Pacing clamp of the present being rendered: 0 none, 1 late (no newer
+  // scene: held/extrapolated), 2 early (before prev). Monitor attribution.
+  uint8_t last_clamp = 0;
   double cur_end = 0.0;
   uint64_t cur_end_gen = 0;
   double dt_ema = 0.0;
@@ -10579,6 +10607,44 @@ InterFrameState g_inter;
 double InterFramePlannedCost(bool inter) {
   return inter ? g_inter.inter_cost + 1.5 * g_inter.inter_mad
                : g_inter.real_cost + 1.5 * g_inter.real_mad;
+}
+
+// Fit lat from the measured presents (see InterFrameState::lat_samples):
+// the summed clamp error sum(max(0, need - extra - l)) + sum(max(0, l - need
+// - span)) is convex in l; its minimum is where the count of presents that
+// would clamp late equals the count that would clamp early (the slope's
+// sign change), found by bisection over the sorted bounds. O(n log n).
+// Returns false without enough samples.
+constexpr size_t kLatWindow = 1024;
+bool InterFrameFitLat(double* out) {
+  const auto& v = g_inter.lat_samples;
+  if (v.size() < 200) return false;
+  static std::vector<float> late_at, early_at;  // render thread only
+  late_at.clear();
+  early_at.clear();
+  for (const auto& s : v) {
+    late_at.push_back(s.need - s.extra);  // late if l below this
+    early_at.push_back(s.need + s.span);  // early if l above this
+  }
+  std::sort(late_at.begin(), late_at.end());
+  std::sort(early_at.begin(), early_at.end());
+  double lo = std::min(late_at.front(), early_at.front());
+  double hi = std::max(late_at.back(), early_at.back());
+  if (!(hi > lo) || hi - lo > 0.1) return false;
+  for (int it = 0; it < 40; ++it) {
+    const double l = 0.5 * (lo + hi);
+    const size_t n_late = size_t(late_at.end() - std::upper_bound(late_at.begin(), late_at.end(),
+                                                                   float(l)));
+    const size_t n_early =
+        size_t(std::lower_bound(early_at.begin(), early_at.end(), float(l)) - early_at.begin());
+    if (n_late > n_early) {
+      lo = l;  // more late than early: increasing lat still lowers the error
+    } else {
+      hi = l;
+    }
+  }
+  *out = 0.5 * (lo + hi);
+  return true;
 }
 
 // NativeInterFrameHooks::present_at.
@@ -10744,10 +10810,31 @@ void InterFrameNoteSwap(const std::shared_ptr<const FrameScene>& scene) {
                               ? g_inter.content_dt
                               : 0.001;
     // Age at this swap present's predicted DISPLAY time (render end).
-    const double target = (now + InterFramePlannedCost(false) - scene->play_time) + margin;
+    double target = (now + InterFramePlannedCost(false) - scene->play_time) + margin;
+    // Measured optimum once enough presents were seen (refit every 0.5 s).
+    if (now >= g_inter.lat_fit_next) {
+      g_inter.lat_fit_next = now + 0.5;
+      double opt;
+      g_inter.lat_opt = InterFrameFitLat(&opt) ? opt : 0.0;
+    }
+    const bool fitted = g_inter.lat_opt > 0.0;
+    if (fitted) target = g_inter.lat_opt;
+    const double step_dt = std::clamp(now - g_inter.lat_last_t, 0.0, 0.05);
+    g_inter.lat_last_t = now;
     if (!g_inter.lat_valid || std::fabs(target - g_inter.lat) > 0.05) {
       g_inter.lat = target;  // first sample / pause / clock reset: snap
       g_inter.lat_valid = true;
+      if (fitted) {
+        // The measured timing belonged to before the pause/reset.
+        g_inter.lat_samples.clear();
+        g_inter.lat_head = 0;
+        g_inter.lat_opt = 0.0;
+      }
+    } else if (fitted) {
+      // Rate-limited (<= 2% playback speed change): a lat change is a
+      // content-speed change while it happens.
+      const double step = 0.02 * step_dt;
+      g_inter.lat += std::clamp(target - g_inter.lat, -step, step);
     } else {
       g_inter.lat += (target - g_inter.lat) * 0.03;
     }
@@ -11470,6 +11557,26 @@ class InterFrameAdvance {
       const double shown =
           InterFrameNow() + InterFramePlannedCost(rex::graphics::IsNativeInterFrame());
       g_inter.present_at = shown;
+      {
+        // Measurement for InterFrameFitLat.
+        const double span = scene.play_time - p.play_time;
+        if (span > 0.0 && span < 0.1) {
+          InterFrameState::LatSample s{float(shown - scene.play_time), float(span),
+                                       float((a_max - 1.0) * span)};
+          auto& v = g_inter.lat_samples;
+          if (v.size() < kLatWindow) {
+            v.push_back(s);
+          } else {
+            v[g_inter.lat_head] = s;
+            g_inter.lat_head = (g_inter.lat_head + 1) % kLatWindow;
+          }
+        }
+      }
+      {
+        const double a_raw =
+            (shown - g_inter.lat - p.play_time) / (scene.play_time - p.play_time);
+        g_inter.last_clamp = a_raw > a_max ? 1 : (a_raw < 0.0 ? 2 : 0);
+      }
       a = float(std::clamp((shown - g_inter.lat - p.play_time) /
                                (scene.play_time - p.play_time),
                            0.0, a_max));
@@ -11780,8 +11887,155 @@ int64_t PaceNowNs() {
       .count();
 }
 
+// Always-on smoothness monitor (one log line per 10 s). Per present: the
+// content time it shows and when it is seen (planned display time, else the
+// render end). Perfect motion = content advancing exactly as fast as display
+// time between consecutive presents. Measures:
+//   drops        display interval > 1.5x the window median (a missed frame)
+//   step error   |content step - display step|: the speed error a viewer
+//                sees on that present (microstutter), % of the median step
+//   holds        content did not advance while display did (a frozen frame)
+//   reversals    content went backwards
+//   c->d         display time - content time: mean = presentation latency,
+//                sd = its jitter (the same microstutter, in ms)
+// Render thread only.
+// Cause attribution: every drop and every bad step (error > 25% of the
+// previous window's median interval) is charged to the FIRST matching cause:
+//   sim       the smoother held (a sim frame arrived after it was due)
+//   late      pacing clamped late (no newer guest scene by display time)
+//   early     pacing clamped early (content before the previous scene)
+//   render    this present's native render overran (planned display time
+//             missed, or > 1.5x the usual cost)
+//   guest     the render thread sat idle for most of the gap waiting for a
+//             guest frame (guest CPU)
+//   other     none of the above (OS / present queue / unknown)
+enum SmoothCause { kCauseSim, kCauseLate, kCauseEarly, kCauseRender, kCauseGuest, kCauseOther,
+                   kCauseCount };
+struct SmoothMonitor {
+  bool pending = false;
+  double content = 0.0, target = 0.0;
+  double start = 0.0, last_end = 0.0, prev_med = 0.0;
+  uint8_t clamp = 0;
+  bool held = false, inter = false;
+  uint64_t bad_by[kCauseCount] = {}, drop_by[kCauseCount] = {};
+  double last_disp = 0.0, last_content = 0.0;
+  bool have_last = false;
+  double t0 = 0.0;
+  uint64_t presents = 0, holds = 0, reversals = 0, cuts = 0;
+  std::vector<double> dd, err, lat;
+};
+SmoothMonitor g_smon;
+
+void SmoothMonitorEnd(double now) {
+  SmoothMonitor& m = g_smon;
+  if (!m.pending) return;
+  m.pending = false;
+  const double disp = m.target > 0.0 ? m.target : now;
+  if (!(m.content > 0.0)) {
+    m.have_last = false;
+    return;
+  }
+  const double d_disp0 = disp - m.last_disp;
+  const double d_cont0 = m.content - m.last_content;
+  if (m.have_last && d_disp0 > 0.0 && d_disp0 < 0.25 && std::fabs(d_cont0 - d_disp0) > 0.1) {
+    ++m.cuts;  // pause / clock reset / camera cut: not a pacing sample
+  } else if (m.have_last && d_disp0 > 0.0 && d_disp0 < 0.25) {
+    const double d_disp = d_disp0;
+    const double d_cont = d_cont0;
+    {
+      const double ref = m.prev_med > 0.0 ? m.prev_med : d_disp;
+      const double refresh = 1.0 / std::max(InterFrameTargetHz(), 1.0);
+      const bool drop = d_disp > std::max(1.5 * ref, 1.5 * refresh);
+      const bool bad = std::fabs(d_cont - d_disp) > 0.25 * ref;
+      if (drop || bad) {
+        const double dur = now - m.start;
+        const bool overran = (m.target > 0.0 && now > m.target + 0.0005) ||
+                             dur > 1.5 * InterFramePlannedCost(m.inter) + 0.0005;
+        const double idle = m.start - m.last_end;
+        SmoothCause c = kCauseOther;
+        if (m.held) c = kCauseSim;
+        else if (m.clamp == 1) c = kCauseLate;
+        else if (m.clamp == 2) c = kCauseEarly;
+        else if (overran) c = kCauseRender;
+        else if (idle > 0.5 * d_disp) c = kCauseGuest;
+        if (bad) ++m.bad_by[c];
+        if (drop) ++m.drop_by[c];
+      }
+    }
+    m.dd.push_back(d_disp);
+    m.err.push_back(std::fabs(d_cont - d_disp));
+    m.lat.push_back(disp - m.content);
+    if (d_cont < 0.0) {
+      ++m.reversals;
+    } else if (d_cont < 0.05 * d_disp) {
+      ++m.holds;
+    }
+    ++m.presents;
+  }
+  m.have_last = true;
+  m.last_disp = disp;
+  m.last_content = m.content;
+  m.last_end = now;
+  if (m.t0 == 0.0) m.t0 = now;
+  if (now - m.t0 < 10.0) return;
+  const double span = now - m.t0;
+  m.t0 = now;
+  if (m.dd.size() >= 30) {
+    const auto pct = [](std::vector<double> v, double q) {
+      std::sort(v.begin(), v.end());
+      return v[std::min(v.size() - 1, size_t(double(v.size()) * q))];
+    };
+    const double med = pct(m.dd, 0.5);
+    // A drop = a gap a display refresh (or 1.5 frames, if presents are
+    // slower than refresh) passed without a new frame. Presents faster than
+    // the display are never fully seen, so their gaps under one refresh are
+    // not drops.
+    const double refresh = 1.0 / std::max(InterFrameTargetHz(), 1.0);
+    const double drop_at = std::max(1.5 * med, refresh * 1.5);
+    uint64_t drops = 0;
+    for (double d : m.dd) drops += d > drop_at ? 1 : 0;
+    double lm = 0.0;
+    for (double l : m.lat) lm += l;
+    lm /= double(m.lat.size());
+    double lv = 0.0;
+    for (double l : m.lat) lv += (l - lm) * (l - lm);
+    const double lsd = std::sqrt(lv / double(m.lat.size()));
+    REXLOG_INFO(
+        "smoothness: {} presents ({:.0f}/s) interval p50 {:.2f} p99 {:.2f} ms, {} drops | "
+        "step error p50 {:.1f}% p95 {:.1f}% p99 {:.1f}% | holds {} reversals {} cuts {} | "
+        "content->display {:.1f} ms sd {:.2f} | pacing lat {:.2f} ms{}",
+        m.presents, double(m.presents) / span, med * 1e3, pct(m.dd, 0.99) * 1e3, drops,
+        100.0 * pct(m.err, 0.5) / med, 100.0 * pct(m.err, 0.95) / med,
+        100.0 * pct(m.err, 0.99) / med, m.holds, m.reversals, m.cuts, lm * 1e3, lsd * 1e3,
+        g_inter.lat * 1e3, g_inter.lat_opt > 0.0 ? " (measured)" : " (estimate)");
+    const auto& b = m.bad_by;
+    const auto& d = m.drop_by;
+    REXLOG_INFO(
+        "smoothness causes: bad steps sim {} late {} early {} render {} guest {} other {} | "
+        "drops sim {} late {} early {} render {} guest {} other {}",
+        b[kCauseSim], b[kCauseLate], b[kCauseEarly], b[kCauseRender], b[kCauseGuest],
+        b[kCauseOther], d[kCauseSim], d[kCauseLate], d[kCauseEarly], d[kCauseRender],
+        d[kCauseGuest], d[kCauseOther]);
+    m.prev_med = med;
+  }
+  for (auto& v : m.bad_by) v = 0;
+  for (auto& v : m.drop_by) v = 0;
+  m.dd.clear();
+  m.err.clear();
+  m.lat.clear();
+  m.presents = m.holds = m.reversals = m.cuts = 0;
+}
+
 void PaceRecordPresent(const FrameScene& scene, bool inter_frame, double content_time,
                        const float* posed_head) {
+  g_smon.pending = true;
+  g_smon.content = content_time;
+  g_smon.target = g_inter.present_at;
+  g_smon.start = InterFrameNow();
+  g_smon.clamp = g_inter.last_clamp;
+  g_smon.inter = inter_frame;
+  // An interpolated present shows the current scene's motion state.
+  g_smon.held = scene.smooth_held;
   const double secs = REXCVAR_GET(skate3_native_render_scene_pace_record);
   if (secs <= 0.0) {
     g_pace_armed_for = 0.0;
@@ -11909,7 +12163,10 @@ void PaceRecordEnd() {
 struct RenderCostTimer {
   double t0 = InterFrameNow();
   bool inter = rex::graphics::IsNativeInterFrame();
-  RenderCostTimer() { g_inter.present_at = 0.0; }
+  RenderCostTimer() {
+    g_inter.present_at = 0.0;
+    g_inter.last_clamp = 0;
+  }
   ~RenderCostTimer() {
     const double end = InterFrameNow();
     const double d = end - t0;
@@ -11924,6 +12181,7 @@ struct RenderCostTimer {
       g_inter.cur_end = end;
       g_inter.cur_end_gen = g_inter.cur_generation;
     }
+    SmoothMonitorEnd(end);
     PaceRecordEnd();
   }
 };

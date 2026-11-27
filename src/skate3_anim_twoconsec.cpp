@@ -44,10 +44,14 @@
 //   coef[i] = (initial[chIdx][i]*scale^2 + scale/32768) * idctCoef[frame&7][i]
 //
 // FOUR THINGS THAT HAD TO BE EXACTLY RIGHT, each found by measurement:
-//   1. FP CONTRACTION OFF. The guest's vmaddcfp is lowered as unfused
-//      add(mul(a,b),c) -- two roundings. Clang contracts to FMA (one) under
-//      -O3 -march=x86-64-v3. A case with a single non-zero input term still
-//      diverged, which ruled out summation order and pointed here.
+//   1. MATCH THE SDK'S vmaddcfp LOWERING. It was once unfused add(mul(a,b),c)
+//      (hence contract off below); the current SDK lowers vmaddcfp128 to
+//      simde_mm_fmadd_ps -- FUSED -- so the two multiply-adds here use fmaf.
+//      The unfused version silently drifted by 1+ ulp on 53% of calls after
+//      the SDK change (found 2026-11-17 by sk83_anim_twoconsec_verify_all;
+//      fixed: 3.8M calls, 0 differ). The decode also runs under the guest's
+//      VMX flush mode, which the hook now sets before calling it. Re-check this
+//      whenever the SDK's vector lowering changes.
 //   2. vmsum4fp128, not scalar math. The SDK lowers it to one DPPS, whose
 //      internal summation no scalar tree reproduces. Using the SDK's own
 //      function is bit-exact AND cheaper (one instruction per 4-element dot),
@@ -76,6 +80,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
+#include <atomic>
+#include <vector>
+
+#include <rex/cvar.h>
+#include <rex/logging.h>
 
 // See note 1 above -- this must stay unfused to match the guest.
 #pragma clang fp contract(off)
@@ -249,7 +259,7 @@ void Unpack(uint8_t* base, uint32_t compressed_stream, uint32_t work,
 
 bool NativeTwoConsec(uint8_t* base, uint32_t self, uint32_t compressed_in,
                      uint32_t frame0, uint32_t frame1, uint32_t put0,
-                     uint32_t put1, uint32_t tid,
+                     uint32_t put1, uint32_t tid, uint32_t local0,
                      uint32_t* out_extent = nullptr) {
   if (tid >= 6 || self == 0) {
     return false;
@@ -305,11 +315,13 @@ bool NativeTwoConsec(uint8_t* base, uint32_t self, uint32_t compressed_in,
   }
 
   const uint32_t aligned = (frame_offset + 3u) & ~3u;
-  const uint32_t out0 = normalized + aligned * (frame0 & 7u) * 4u;
+  // local0: frame0's slot / IDCT row inside the decoded block. frame0 & 7 normally; for a
+  // block-crossing pair the guest decodes only frame1's block and uses frame1 & 7 for both.
+  const uint32_t out0 = normalized + aligned * (local0 & 7u) * 4u;
   const uint32_t out1 = normalized + aligned * (frame1 & 7u) * 4u;
 
   const uint32_t idct0 =
-      self + kIdctCoefTables + (((frame0 & 7u) * 32u) & 0x1FE0u);
+      self + kIdctCoefTables + (((local0 & 7u) * 32u) & 0x1FE0u);
   const uint32_t idct1 =
       self + kIdctCoefTables + (((frame1 & 7u) * 32u) & 0x1FE0u);
 
@@ -332,8 +344,9 @@ bool NativeTwoConsec(uint8_t* base, uint32_t self, uint32_t compressed_in,
     float coef0[8];
     float coef1[8];
     for (int i = 0; i < 8; ++i) {
+      // vmaddcfp128: the SDK lowers it FUSED (simde_mm_fmadd_ps on x86-64-v3)
       const float q =
-          AsF(REX_LOAD_U32(initial + uint32_t(i) * 4u)) * scale_sq + quant_bias;
+          std::fmaf(AsF(REX_LOAD_U32(initial + uint32_t(i) * 4u)), scale_sq, quant_bias);
       coef0[i] = q * AsF(REX_LOAD_U32(idct0 + uint32_t(i) * 4u));
       coef1[i] = q * AsF(REX_LOAD_U32(idct1 + uint32_t(i) * 4u));
     }
@@ -357,8 +370,8 @@ bool NativeTwoConsec(uint8_t* base, uint32_t self, uint32_t compressed_in,
         const float s1 = simde_mm_cvtss_f32(simde_mm_add_ps(
             rex::ppc::simde_mm_vmsum4fp128_ps(dv0, cv1_lo),
             rex::ppc::simde_mm_vmsum4fp128_ps(dv1, cv1_hi)));
-        REX_STORE_U32(out0 + oi * 4u, AsU((s0 + 0.5f) * ch_range + ch_min));
-        REX_STORE_U32(out1 + oi * 4u, AsU((s1 + 0.5f) * ch_range + ch_min));
+        REX_STORE_U32(out0 + oi * 4u, AsU(std::fmaf(s0 + 0.5f, ch_range, ch_min)));
+        REX_STORE_U32(out1 + oi * 4u, AsU(std::fmaf(s1 + 0.5f, ch_range, ch_min)));
       }
       in += 128u;
     }
@@ -481,17 +494,139 @@ extern "C" REX_FUNC(
   }
 }
 
+// Block-crossing pairs (frame0 & 7 == 7, frame1 & 7 == 0; ~12% of calls). Read from the listing
+// (sk83 recomp.116 0x831CE528; retail 0x82E89B80 makes the same choice without the assert): when frame0 >> 3 != frame1 >> 3 the guest asserts
+// (frame0 & 7) == 7 || (frame1 & 7) == 0, then sets its block-local frame0 index to frame1 & 7
+// and works on frame1's block only (the caller passes that block's stream: the guest asserts it
+// against the block offset table). Both decodes use frame1's IDCT row and land in the same
+// normalized slot, and both PutData walks read it, still passing the ORIGINAL frame0 / frame1
+// (they only matter for putLoc == 0). So it is the in-block path with local0 = frame1 & 7.
+REXCVAR_DEFINE_BOOL(sk83_anim_twoconsec_cross, true, "Skate 3",
+                    "Native DecompressTwoConsecFrames for block-crossing frame pairs too.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(sk83_anim_twoconsec_verify_all, false, "Skate 3",
+                    "DIAGNOSTIC: also verify in-block DecompressTwoConsecFrames calls (with _cross_verify).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(sk83_anim_twoconsec_cross_verify, false, "Skate 3",
+                    "DIAGNOSTIC: run block-crossing DecompressTwoConsecFrames both ways and compare.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+namespace {
+// Output extent of one PutData walk (bytes from the put location), as NativeTwoConsec computes it.
+bool CrossExtent(uint8_t* base, uint32_t self, uint32_t tid, uint32_t* ext, uint32_t* norm_bytes) {
+  const uint32_t work = self + kWorkBuffers + tid * kWorkStride;
+  const uint32_t hdr_outer = REX_LOAD_U32(work + 0);
+  if (hdr_outer == 0) return false;
+  const uint32_t hdr = REX_LOAD_U32(hdr_outer);
+  if (hdr == 0) return false;
+  const uint32_t num_channels = REX_LOAD_U8(hdr + 12);
+  const uint32_t palette_size = REX_LOAD_U8(hdr + 13);
+  const uint32_t num_frames = REX_LOAD_U16(hdr + 2);
+  const uint32_t channel_info =
+      (hdr + 16u + 4u * palette_size + 2u * ((num_frames + 7u) / 8u) + 0xFu) & ~0xFu;
+  uint32_t e = 0;
+  for (uint32_t ch = 0; ch < num_channels; ++ch) {
+    const uint32_t entry = channel_info + ch * 16u;
+    const uint32_t total = uint32_t(REX_LOAD_U16(entry + 0)) + REX_LOAD_U16(entry + 2);
+    if (total == 0) continue;
+    const uint32_t blk = self + ch * 12u;
+    const uint32_t end_byte = REX_LOAD_U16(blk + 2) * (total - 1u) + REX_LOAD_U16(blk + 0) +
+                              uint32_t(REX_LOAD_U8(blk + 8)) * 4u;
+    e = e > end_byte ? e : end_byte;
+  }
+  *ext = e;
+  *norm_bytes = ((REX_LOAD_U32(work + kFrameOffset) + 3u) & ~3u) * 8u * 4u;
+  return e != 0 && e < (1u << 20) && *norm_bytes < (1u << 20);
+}
+std::atomic<uint64_t> g_cross_calls{0}, g_cross_bad{0};
+}  // namespace
+
 extern "C" REX_FUNC(
     sub_82E89B80) {
   const uint32_t frame0 = ctx.r5.u32;
+  const uint32_t frame1 = ctx.r6.u32;
+  const bool crossing = (frame0 >> 3) != (frame1 >> 3);
+  if (crossing || (REXCVAR_GET(sk83_anim_twoconsec_verify_all) &&
+                   REXCVAR_GET(sk83_anim_twoconsec_cross_verify) && (frame0 & 7u) != 7u)) {
+    const uint32_t tid = ctx.r9.u32 & 0xFF;
+    const uint32_t self = ctx.r3.u32, put0 = ctx.r7.u32, put1 = ctx.r8.u32;
+    uint32_t ext = 0, nb = 0;
+    if ((crossing && (frame0 & 7u) != 7u && (frame1 & 7u) != 0u) || !REXCVAR_GET(sk83_anim_twoconsec_cross) ||
+        put0 == 0 || put1 == 0 || !CrossExtent(base, self, tid, &ext, &nb)) {
+      __imp__sub_82E89B80(ctx, base);
+      return;
+    }
+    const uint32_t work = self + kWorkBuffers + tid * kWorkStride;
+    const uint32_t norm = REX_LOAD_U32(work + kNormalizedData);
+    const uint32_t scratch = REX_LOAD_U32(work + kScratch);
+    struct R { uint32_t a, n; };
+    const R rs[] = {{put0, ext}, {put1, ext}, {norm, nb}, {work, 64},
+                     {scratch, std::min<uint32_t>(REX_LOAD_U32(work + kFrameOffset) * 32u, kMaxScratchInts * 4u)}};
+    const bool verify = REXCVAR_GET(sk83_anim_twoconsec_cross_verify);
+    thread_local std::vector<uint8_t> before, guest, mine;
+    auto snap = [&](std::vector<uint8_t>& v) {
+      v.clear();
+      for (const R& r : rs) v.insert(v.end(), REX_RAW_ADDR(r.a), REX_RAW_ADDR(r.a) + r.n);
+    };
+    auto restore = [&](const std::vector<uint8_t>& v) {
+      size_t o = 0;
+      for (const R& r : rs) { std::memcpy(REX_RAW_ADDR(r.a), v.data() + o, r.n); o += r.n; }
+    };
+    if (verify) {
+      snap(before);
+      PPCContext g = ctx;
+      __imp__sub_82E89B80(g, base);
+      snap(guest);
+      restore(before);
+    }
+    ctx.fpscr.enableFlushModeUnconditional();  // guest: VMX flush mode (FTZ/DAZ) for the decode
+    if (!NativeTwoConsec(base, self, ctx.r4.u32, frame0, frame1, put0, put1, tid,
+                         crossing ? (frame1 & 7u) : (frame0 & 7u))) {
+      if (verify) { restore(guest); return; }
+      __imp__sub_82E89B80(ctx, base);
+      return;
+    }
+    if (verify) {
+      snap(mine);
+      const uint64_t c = g_cross_calls.fetch_add(1) + 1;
+      // the scratch region is only compared over what the unpack writes; the guest may leave
+      // more there (it is input to the next unpack only) -- compare outputs + normalized + work
+      size_t lim = 0;
+      for (int k = 0; k < 4; ++k) lim += rs[k].n;
+      static std::atomic<uint64_t> s_in{0}, s_in_bad{0};
+      if (!crossing) s_in++;
+      if (std::memcmp(mine.data(), guest.data(), lim) != 0) {
+        if (!crossing) s_in_bad++;
+        size_t f = 0;
+        while (mine[f] == guest[f]) ++f;
+        if (g_cross_bad.fetch_add(1) < 12) {
+          const size_t a = f & ~size_t(3);
+          auto fl = [](const std::vector<uint8_t>& v, size_t at) {
+            uint32_t u = (uint32_t(v[at]) << 24) | (uint32_t(v[at + 1]) << 16) | (uint32_t(v[at + 2]) << 8) | v[at + 3];
+            float x; std::memcpy(&x, &u, 4); return x;
+          };
+          int ndiff = 0;
+          for (size_t q = 0; q + 3 < lim; q += 4) ndiff += std::memcmp(&mine[q], &guest[q], 4) != 0;
+          REXLOG_WARN("twoconsec verify: first diff byte {} native {:.9g} guest {:.9g} ({} of {} words differ) f0 {} f1 {} cross {} ext {} nb {}",
+                      f, fl(mine, a), fl(guest, a), ndiff, lim / 4, frame0, frame1, crossing, ext, nb);
+        }
+        restore(guest);
+      }
+      if ((c & 0x3FFF) == 0)
+        REXLOG_INFO("twoconsec cross verify: {} calls, {} differ ({} in-block calls, {} differ)", c,
+                    g_cross_bad.load(), s_in.load(), s_in_bad.load());
+    }
+    return;
+  }
   // Block-crossing (frame0 & 7 == 7, ~12% of calls) needs two unpack passes
   // over one scratch buffer; NativeTwoConsec also returns false for shapes it
   // will not attempt (a joint indexing past the decoded range, a channel wider
   // than the staging buffer, or a walk running past mNumConstantChannels).
   // Everything it declines goes to the guest unchanged.
+  ctx.fpscr.enableFlushModeUnconditional();  // guest: VMX flush mode (FTZ/DAZ) for the decode
   if ((frame0 & 7u) == 7u ||
       !NativeTwoConsec(base, ctx.r3.u32, ctx.r4.u32, frame0, ctx.r6.u32,
-                       ctx.r7.u32, ctx.r8.u32, ctx.r9.u32 & 0xFF)) {
+                       ctx.r7.u32, ctx.r8.u32, ctx.r9.u32 & 0xFF, frame0 & 7u)) {
     __imp__sub_82E89B80(
         ctx, base);
   }

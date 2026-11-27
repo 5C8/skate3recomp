@@ -11,7 +11,7 @@ if(SKATE3_STATIC_MSVC_RUNTIME)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(skate3 VERSION 1.0.9 LANGUAGES CXX)
+project(skate3 VERSION 1.1.0 LANGUAGES CXX)
 
 # Existing checkouts may still have the retired movie override in generated
 # sources. Repair them before compiling; fresh codegen keeps the original call.
@@ -21,6 +21,9 @@ file(GLOB SKATE3_EXISTING_RECOMP_SOURCES
 foreach(SKATE3_EXISTING_RECOMP_SOURCE IN LISTS SKATE3_EXISTING_RECOMP_SOURCES)
     skate3_remove_legacy_movie_override("${SKATE3_EXISTING_RECOMP_SOURCE}")
 endforeach()
+
+include(cmake/TraceSkate3CharacterLoad.cmake)
+skate3_patch_character_load_trace(${SKATE3_EXISTING_RECOMP_SOURCES})
 
 if(WIN32)
     enable_language(RC)
@@ -262,6 +265,17 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_draw_distance.cpp
     src/skate3_fov.cpp
     src/skate3_iso_installer.cpp
+    src/native/skate3_anim_header.cpp
+    src/native/skate3_jobs_native.cpp
+    src/native/skate3_audio_thread.cpp
+    src/native/skate3_buffer_events.cpp
+    src/native/skate3_anim_split.cpp
+    src/native/skate3_anim_native.cpp
+    src/native/skate3_native_sync.cpp
+    src/native/skate3_native_collision.cpp
+    src/native/skate3_native_physics.cpp
+    src/native/skate3_native_render_game.cpp
+    src/skate3_guest_replay.cpp
     src/native/skate3_native_diagnostics.cpp
     src/native/skate3_native_entity.cpp
     src/native/skate3_native_guest_read.cpp
@@ -272,6 +286,8 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_native_scene.cpp
     src/skate3_native_scene_gpu.cpp
     src/skate3_native_scene_post.cpp
+    src/skate3_present_clock.cpp
+    src/skate3_guest_profiler.cpp
     src/skate3_screenshot.cpp
     src/skate3_deck_shadow.cpp
     src/skate3_skater_proportions.cpp
@@ -289,6 +305,10 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_anim_twoconsec.cpp
     src/skate3_guest_aspect.cpp
     src/skate3_apt_spread.cpp
+    src/skate3_lua_trace.cpp
+    src/skate3_nis_trace.cpp
+    src/skate3_traffic_trace.cpp
+    src/skate3_job_addevent_fix.cpp  # EA::Jobs lost-release race fix (state 4 = finished)
     src/skate3_shader_disasm.cpp
     src/skate3_title_update_installer.cpp
     src/skate3_user_settings.cpp
@@ -342,6 +362,12 @@ target_include_directories(skate3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}/include
 )
+# decompiled sources copied from sk83_na_m (src/native/decomp, see its README): support headers
+target_include_directories(skate3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/native/decomp/support)
+if(NOT WIN32)
+    # the decompiled sources use the MSVC keyword (clang accepts it only for Windows targets)
+    target_compile_definitions(skate3 PRIVATE "__forceinline=inline __attribute__((always_inline))")
+endif()
 
 set(SKATE3_NATIVE_SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/scene.hlsl

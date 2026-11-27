@@ -108,6 +108,10 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_cas_yield);
 
 // Smoothness / pacing.
 REXCVAR_DECLARE(bool, skate3_native_render_scene_smooth_camera);
+REXCVAR_DECLARE(bool, skate3_present_clock);
+REXCVAR_DECLARE(double, skate3_present_clock_late_pct);
+REXCVAR_DECLARE(double, skate3_guest_profile);
+REXCVAR_DECLARE(bool, skate3_guest_profile_main);
 REXCVAR_DECLARE(double, skate3_native_render_scene_smooth_camera_filter_ms);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_sort_opaque);
 REXCVAR_DECLARE(double, skate3_guest_fps_cap);
@@ -1315,6 +1319,48 @@ void DrawDiagnosticsSection() {
     float amp = float(REXCVAR_GET(skate3_native_render_scene_synthetic_pan_amp));
     if (ImGui::SliderFloat("pan amplitude (0 = full spin)", &amp, 0.0f, 60.0f, "%.0f")) {
       REXCVAR_SET(skate3_native_render_scene_synthetic_pan_amp, double(amp));
+    }
+    {
+      const bool pc = CvarCheckbox(
+          "Even presentation clock", REXCVAR_GET(skate3_present_clock),
+          "Interpolates sim frames on a continuous clock trailing the newest frame "
+          "(skate3_present_clock). Off = the game's own clock: jumps to each new frame and "
+          "freezes (alpha 1.0) until the next one; ~65% of frames held during a pan.");
+      if (pc != REXCVAR_GET(skate3_present_clock)) {
+        REXCVAR_SET(skate3_present_clock, pc);
+        // The clock's evenness reaches the screen through the native
+        // smoother (it plays exactly on the clock); they go together.
+        if (pc) REXCVAR_SET(skate3_native_render_scene_smooth_camera, true);
+      }
+      const double late = CvarSlider(
+          "late frames allowed (%)", REXCVAR_GET(skate3_present_clock_late_pct), 0.05f, 5.0f,
+          "%.2f",
+          "The clock measures when sim frames arrive and picks the smallest delay at which "
+          "only this share of frames arrives after it is due (each one is a short hold). "
+          "Lower = fewer holds, slightly more delay (present-clock log).");
+      if (late != REXCVAR_GET(skate3_present_clock_late_pct))
+        REXCVAR_SET(skate3_present_clock_late_pct, late);
+    }
+    if (ImGui::Button("Profile guest render thread (20 s)")) {
+      // Re-arms on a value change; a fractional counter keeps each press new.
+      static int s_presses = 0;
+      REXCVAR_SET(skate3_guest_profile_main, false);
+      REXCVAR_SET(skate3_guest_profile, 20.0 + 0.001 * double(++s_presses));
+    }
+    if (ImGui::Button("Profile main/sim thread (60 s)")) {
+      static int s_presses = 0;
+      REXCVAR_SET(skate3_guest_profile_main, true);
+      REXCVAR_SET(skate3_guest_profile, 60.0 + 0.001 * double(++s_presses));
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Samples the main (sim) thread for 60 s and writes "
+                        "logs/mainprof_<ts>.txt: what it does in slow sim ticks (the 'sim' "
+                        "stutter bursts). Skate normally; the bursts are occasional.");
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Samples the guest render thread at ~2 kHz and writes "
+                        "logs/guestprof_<ts>.txt: the game functions with the most extra time "
+                        "in slow frames (running and blocked). Play normally while it runs.");
     }
     if (ImGui::Button("Record camera signal (8 s)")) {
       skate3::native_scene::RecordCameraSignal(8.0);

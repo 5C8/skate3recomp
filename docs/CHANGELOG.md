@@ -1,5 +1,60 @@
 # Release notes
 
+## 1.1.0
+
+Performance (most of it from the sk83_na_m milestone project, ported to retail).
+Each piece of game code that now runs natively was checked against the retail
+game's own function and gives byte-identical results.
+
+- **Faster busy scenes:** the custom renderer no longer lets the game submit draw
+  calls for static world geometry it already holds. Reflective windows and
+  ad/photo billboards are included once their reflection or picture has been
+  captured. Static items are built once and reused instead of every frame, and
+  the world-shading pass records its meshes directly. At a busy Downtown test spot
+  the game's own draw calls fell from about 650 to about 460 per frame.
+- **Native game code:** the rigid-body physics solver (about 2.6x faster),
+  animation pose and blend jobs, animation header decoding, collision queries,
+  the job system's job runner, the audio library's lock and render-thread state
+  setters and mesh submission. Audio updates run on their own thread, and the
+  packed-animation fetch is split across helper threads.
+- **Steadier frame timing:** the presentation clock from sk83_na_m. Frames are
+  timed by when the game stored them, and the simulation tick timer runs on an
+  exact 60 Hz line. In testing, the input-to-display delay went from 22-29 ms to
+  about 19 ms, and frame-arrival jitter (99th percentile) from 9-15 ms to 3-4 ms.
+  Also fixes the camera running a frame ahead after a respawn.
+- **Profile-guided optimisation:** the Windows build is optimised with a new
+  profile recorded on this code, and uses the mimalloc allocator.
+
+Fixes
+
+- **Game freeze:** fixed a race in the game's job system. A job could wait
+  forever on a dependency that had already finished, freezing the game.
+- **AMD GPU hang on Direct3D 12:** fixed. Shadow passes left shader inputs
+  unbound, and render targets were created uninitialised, which hung AMD GPUs a
+  few seconds into gameplay. GPU crash diagnostics (DRED) are now always on, and
+  Direct3D 12 debug messages are written to the log.
+- **Streaming stalls:** file lookups no longer hold the lock that every guest
+  thread's atomic operations use.
+- **Animation precision:** two-frame animation decoding now rounds exactly like
+  the game.
+- **Own skater proportions (Mods):** custom skaters' spine and legs are no
+  longer displaced about a metre in cutscenes.
+
+Vulkan and Linux
+
+- **Frame generation on Vulkan:** generated frames between game frames
+  (**Settings**, off by default) now work on the Vulkan backend, including Linux.
+  The FPS counter shows the real game rate next to the presented rate there too.
+  The separate native render thread remains Direct3D 12-only.
+
+Diagnostics
+
+- Lua script errors, cutscene ground snapping and traffic-network loading are
+  logged. A call through a null function pointer logs the guest call stack.
+  New `skate3_character_load_trace` option (off by default).
+
+- **SDK revision:** `942046b66c098113fb578422f914b121e721f7c4` ([source](https://github.com/5C8/rexglue-skate3/commit/942046b66c098113fb578422f914b121e721f7c4)), used for both Linux and Windows builds.
+
 ## 1.0.9
 
 - **Linux:** Schedule GTK redraws on the UI thread to address the gameplay crash reported in [#7](https://github.com/5C8/skate3recomp/issues/7).
