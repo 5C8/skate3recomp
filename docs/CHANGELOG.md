@@ -39,6 +39,8 @@ Fixes
   the game.
 - **Own skater proportions (Mods):** custom skaters' spine and legs are no
   longer displaced about a metre in cutscenes.
+- **Executable icon:** the icon is now part of the repository
+  (`resources/icon.ico`) and always built into `skate3.exe`.
 
 Vulkan and Linux
 

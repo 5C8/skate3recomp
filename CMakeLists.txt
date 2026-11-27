@@ -332,11 +332,14 @@ if(WIN32)
         COPYONLY
     )
     target_link_options(skate3 PRIVATE LINKER:/MANIFESTINPUT:skate3_app.manifest)
-    # Exe icon (Explorer + the SDK window class's MAINICON), the same way
-    # sk83_na_m embeds its own. game/ is gitignored, so a checkout without
-    # the file keeps the runtime fallback that derives the icon from the
-    # game's dashboard art (skate3_win_icon.h).
-    set(SKATE3_ICON_FILE ${CMAKE_CURRENT_SOURCE_DIR}/game/icon.ico)
+    # Exe icon (Explorer + the SDK window class's MAINICON): resources/icon.ico
+    # (in the repository), else a local game/icon.ico; without either the
+    # runtime fallback derives the icon from the game's dashboard art
+    # (skate3_win_icon.h).
+    set(SKATE3_ICON_FILE ${CMAKE_CURRENT_SOURCE_DIR}/resources/icon.ico)
+    if(NOT EXISTS ${SKATE3_ICON_FILE})
+        set(SKATE3_ICON_FILE ${CMAKE_CURRENT_SOURCE_DIR}/game/icon.ico)
+    endif()
     if(EXISTS ${SKATE3_ICON_FILE})
         set(SKATE3_RC_ICON_LINE "MAINICON ICON \"${SKATE3_ICON_FILE}\"")
         target_compile_definitions(skate3 PRIVATE SKATE3_EMBEDDED_ICON=1)
